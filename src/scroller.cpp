@@ -21,10 +21,10 @@ namespace {
 
 class ScrollerBase : public ComponentBase {
  public:
-  ScrollerBase(Component child, Ref<int> selected, int viewport_height,
+  ScrollerBase(Component child, Ref<int> selected, Ref<int> viewport_height,
                std::function<void(int, int)> on_change)
       : selected_(std::move(selected)),
-        viewport_height_(std::max(1, viewport_height)),
+        viewport_height_(std::move(viewport_height)),
         on_change_(std::move(on_change)) {
     Add(child);
   }
@@ -34,12 +34,14 @@ class ScrollerBase : public ComponentBase {
     Element background = ComponentBase::Render();
     background->ComputeRequirement();
     content_height_ = std::max(1, background->requirement().min_y);
+    int viewport_height = std::max(1, *viewport_height_);
+    *viewport_height_ = viewport_height;
 
     // Invert the frame's centering so the top visible line equals `selected`.
     // The frame computes dy = content*y - viewport/2; we want dy = selected,
     // hence y = (selected + viewport/2 - 1) / content. The -1 accounts for the
-    // frame's exclusive box bounds.
-    float y = static_cast<float>(*selected_) + viewport_height_ / 2.f - 1.f;
+    // frame's exclusive box bounds. Clamp y to keep the frame within bounds.
+    float y = static_cast<float>(*selected_) + viewport_height / 2.f - 1.f;
     y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
 
     return std::move(background) | focusPositionRelative(0.f, y) | yframe |
@@ -47,8 +49,12 @@ class ScrollerBase : public ComponentBase {
   }
 
   bool OnEvent(Event event) final {
+    if (content_height_ < 0) {
+      return false;  // no render yet; have not measured content or viewport.
+    }
+    int viewport_height = std::max(1, *viewport_height_);
     int before = *selected_;
-    int max_offset = std::max(0, content_height_ - viewport_height_);
+    int max_offset = std::max(0, content_height_ - viewport_height);
 
     int after = before;
     if (event == Event::ArrowUp || event == Event::Character('k')) {
@@ -56,9 +62,9 @@ class ScrollerBase : public ComponentBase {
     } else if (event == Event::ArrowDown || event == Event::Character('j')) {
       after = before + 1;
     } else if (event == Event::PageUp) {
-      after = before - (viewport_height_ - 1);
+      after = before - (viewport_height - 1);
     } else if (event == Event::PageDown) {
-      after = before + (viewport_height_ - 1);
+      after = before + (viewport_height - 1);
     } else if (event == Event::Home) {
       after = 0;
     } else if (event == Event::End) {
@@ -86,17 +92,17 @@ class ScrollerBase : public ComponentBase {
   bool Focusable() const final { return true; }
 
   Ref<int> selected_;
-  int viewport_height_;
+  Ref<int> viewport_height_;
   std::function<void(int, int)> on_change_;
   int content_height_ = -1;
 };
 
 }  // namespace
 
-Component Scroller(Component child, Ref<int> selected, int viewport_height,
+Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
                    std::function<void(int, int)> on_change) {
   return Make<ScrollerBase>(std::move(child), std::move(selected),
-                            viewport_height, std::move(on_change));
+                            std::move(viewport_height), std::move(on_change));
 }
 
 }  // namespace ftxui

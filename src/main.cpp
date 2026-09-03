@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
   int selected = 0;
   int viewport_height = Terminal::Size().dimy;
   auto scroller =
-      Scroller(std::move(content), &selected, viewport_height,
+      Scroller(std::move(content), &selected, &viewport_height,
                [&](int before, int after) { log("scroll", before, after); });
 
   auto screen = App::Fullscreen();

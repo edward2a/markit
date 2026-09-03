@@ -18,9 +18,9 @@ namespace ftxui {
 /// Navigation: j/k, ArrowUp/ArrowDown, PageUp/PageDown, Home/End.
 /// @param child The content to scroll.
 /// @param selected Shared scroll offset (index of the topmost visible line).
-/// @param viewport_height Number of visible rows (terminal height).
+/// @param viewport_height Shared number of visible rows (terminal height).
 /// @param on_change Optional callback fired whenever @p selected changes.
-Component Scroller(Component child, Ref<int> selected, int viewport_height,
+Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
                    std::function<void(int before, int after)> on_change = {});
 
 }  // namespace ftxui

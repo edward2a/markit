@@ -35,9 +35,7 @@ ftxui::Component MakeLines(int n) {
 void Prime(ftxui::Component& scroller) {
   ftxui::Screen screen(kWidth, kHeight);
   ftxui::Render(screen, scroller->Render());
-}
-
-// Render the scroller's current output into a fresh screen and return the
+}// Render the scroller's current output into a fresh screen and return the
 // content of the top visible row (source line text occupying row 0).
 std::string TopRow(ftxui::Component& scroller) {
   ftxui::Screen screen(kWidth, kHeight);
@@ -70,7 +68,8 @@ int LineNumber(const std::string& row) {
 TEST(Scroller, DownAdvancesOnePerPress) {
   int n = 60;
   int selected = 0;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, kHeight);
+  int viewport = kHeight;
+  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   for (int i = 1; i <= 40; ++i) {
@@ -82,7 +81,8 @@ TEST(Scroller, DownAdvancesOnePerPress) {
 // `k` moves back by one and clamps at the top (returns false when unchanged).
 TEST(Scroller, UpMovesOneAndClampsAtTop) {
   int selected = 5;
-  auto scroller = ftxui::Scroller(MakeLines(60), &selected, kHeight);
+  int viewport = kHeight;
+  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport);
   Prime(scroller);
 
   ASSERT_TRUE(scroller->OnEvent(ftxui::Event::k));
@@ -100,7 +100,8 @@ TEST(Scroller, UpMovesOneAndClampsAtTop) {
 TEST(Scroller, ViewScrollsOneLinePerPress) {
   int n = 60;
   int selected = 0;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, kHeight);
+  int viewport = kHeight;
+  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   // First press already scrolls: line-0 becomes line-1.
@@ -120,7 +121,8 @@ TEST(Scroller, ViewScrollsOneLinePerPress) {
 TEST(Scroller, PageScrollsByViewportHeight) {
   int n = 60;
   int selected = 0;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, kHeight);
+  int viewport = kHeight;
+  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   ASSERT_TRUE(scroller->OnEvent(ftxui::Event::PageDown));
@@ -136,7 +138,8 @@ TEST(Scroller, PageScrollsByViewportHeight) {
 TEST(Scroller, HomeEnd) {
   int n = 60;
   int selected = 30;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, kHeight);
+  int viewport = kHeight;
+  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Home));
@@ -153,9 +156,10 @@ TEST(Scroller, HomeEnd) {
 // The on_change callback fires with before/after on every transition.
 TEST(Scroller, OnChangeCallback) {
   int selected = 0;
+  int viewport = kHeight;
   std::vector<std::pair<int, int>> calls;
   auto scroller = ftxui::Scroller(
-      MakeLines(60), &selected, kHeight,
+      MakeLines(60), &selected, &viewport,
       [&](int before, int after) { calls.emplace_back(before, after); });
   Prime(scroller);
 
@@ -165,4 +169,36 @@ TEST(Scroller, OnChangeCallback) {
   ASSERT_EQ(calls.size(), 2u);
   EXPECT_EQ(calls[0], std::make_pair(0, 1));
   EXPECT_EQ(calls[1], std::make_pair(1, 2));
+}
+
+// When the viewport is at least as tall as the content, nothing can scroll:
+// every navigation is a no-op and offsets clamp to 0.
+TEST(Scroller, NoScrollWhenContentFitsViewport) {
+  int n = 4;  // fewer lines than the 8-row viewport
+  int selected = 0;
+  int viewport = kHeight;
+  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
+  Prime(scroller);
+
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::j));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::k));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::PageDown));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::PageUp));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::End));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::Home));
+  EXPECT_EQ(selected, 0);
+}
+
+// An event arriving before the first render must be safely ignored rather
+// than computing a bogus max_offset from unitialized content height.
+TEST(Scroller, EventBeforeFirstRenderIsIgnored) {
+  int selected = 0;
+  int viewport = kHeight;
+  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport);
+
+  // No Prime() call: the component has not measured content yet.
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::j));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::PageDown));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::End));
+  EXPECT_EQ(selected, 0);
 }
