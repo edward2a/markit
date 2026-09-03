@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -9,6 +8,9 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
+
+#include "scroller.hpp"
 
 using namespace ftxui;
 
@@ -49,8 +51,6 @@ int main(int argc, char** argv) {
     lines.push_back("(empty file)");
   }
 
-  int scroll_offset = 0;
-
   std::ofstream debug;
   if (!debug_file.empty()) {
     debug.open(debug_file);
@@ -75,20 +75,14 @@ int main(int argc, char** argv) {
     return vbox(std::move(elements));
   });
 
-  auto scrollable = Renderer(content, [&] {
-    int max_offset = static_cast<int>(lines.size()) - 1;
-    float scroll_y = max_offset > 0
-                         ? static_cast<float>(scroll_offset) / max_offset
-                         : 0.f;
-    return content->Render()
-      | focusPositionRelative(0.f, scroll_y)
-      | yframe
-      | vscroll_indicator
-      | flex;
-  });
+  int selected = 0;
+  int viewport_height = Terminal::Size().dimy;
+  auto scroller =
+      Scroller(std::move(content), &selected, viewport_height,
+               [&](int before, int after) { log("scroll", before, after); });
 
   auto screen = App::Fullscreen();
-  auto component = CatchEvent(scrollable, [&](Event event) -> bool {
+  auto component = CatchEvent(scroller, [&](Event event) -> bool {
     if (debug.is_open()) {
       debug << "input: " << event.DebugString()
             << " (character: '" << event.character() << "')\n";
@@ -97,42 +91,6 @@ int main(int argc, char** argv) {
 
     if (event == Event::q || event == Event::Escape || event == Event::CtrlC) {
       screen.Exit();
-      return true;
-    }
-    if (event == Event::ArrowDown || event == Event::j) {
-      auto before = scroll_offset;
-      scroll_offset = std::min(scroll_offset + 1, static_cast<int>(lines.size()) - 1);
-      log("down", before, scroll_offset);
-      return true;
-    }
-    if (event == Event::ArrowUp || event == Event::k) {
-      auto before = scroll_offset;
-      scroll_offset = std::max(scroll_offset - 1, 0);
-      log("up", before, scroll_offset);
-      return true;
-    }
-    if (event == Event::PageDown) {
-      auto before = scroll_offset;
-      scroll_offset = std::min(scroll_offset + 20, static_cast<int>(lines.size()) - 1);
-      log("pagedown", before, scroll_offset);
-      return true;
-    }
-    if (event == Event::PageUp) {
-      auto before = scroll_offset;
-      scroll_offset = std::max(scroll_offset - 20, 0);
-      log("pageup", before, scroll_offset);
-      return true;
-    }
-    if (event == Event::Home) {
-      auto before = scroll_offset;
-      scroll_offset = 0;
-      log("home", before, scroll_offset);
-      return true;
-    }
-    if (event == Event::End) {
-      auto before = scroll_offset;
-      scroll_offset = static_cast<int>(lines.size()) - 1;
-      log("end", before, scroll_offset);
       return true;
     }
     return false;
