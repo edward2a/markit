@@ -17,10 +17,30 @@
 
 using namespace ftxui;
 
+namespace {
+
+void PrintUsage(std::ostream& out) {
+  out << "Usage: markit [options] <file>\n"
+      << "\n"
+      << "Options:\n"
+      << "  -h, --help          Show this help message and exit.\n"
+      << "  --config <file>     Path to a YAML config file (default: "
+         "~/.config/markit/markit.yml).\n"
+      << "  --dump-config       Print the default config (as YAML) to stdout "
+         "and exit.\n"
+      << "  --debug <file>      Write debug event/scroll logs to <file>.\n"
+      << "\n"
+      << "Arguments:\n"
+      << "  <file>              Markdown file to display.\n";
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   std::string debug_file;
   std::string config_file;
   bool dump_config = false;
+  bool help = false;
   const char* input_file = nullptr;
 
   for (int i = 1; i < argc; ++i) {
@@ -31,6 +51,8 @@ int main(int argc, char** argv) {
       debug_file = argv[++i];
     } else if (arg == "--dump-config") {
       dump_config = true;
+    } else if (arg == "-h" || arg == "--help") {
+      help = true;
     } else if (input_file == nullptr) {
       input_file = argv[i];
     } else {
@@ -39,14 +61,18 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (help) {
+    PrintUsage(std::cout);
+    return EXIT_SUCCESS;
+  }
+
   if (dump_config) {
     markit::DumpDefaultConfig(std::cout);
     return EXIT_SUCCESS;
   }
 
   if (input_file == nullptr) {
-    std::cerr << "usage: markit [--debug <file>] [--config <file>]"
-                 " [--dump-config] <file>\n";
+    PrintUsage(std::cerr);
     return EXIT_FAILURE;
   }
 
