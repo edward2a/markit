@@ -4,6 +4,11 @@ project(markit LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# yaml-cpp 0.8.0 declares cmake_minimum_required(3.5); newer CMake rejects
+# configuring a subproject below its minimum supported policy version unless
+# this minimum is relaxed.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 # Build FTXUI and md4c as static libraries. Without this pinning, either
 # dependency can flip BUILD_SHARED_LIBS, silently changing the linkage of
 # the whole project (and the markit binary shrank from ~1.7MB to ~280KB when
@@ -25,16 +30,24 @@ FetchContent_Declare(md4c
 # it static regardless.
 FetchContent_MakeAvailable(md4c)
 
+FetchContent_Declare(yaml-cpp
+  GIT_REPOSITORY https://github.com/jbeder/yaml-cpp
+  GIT_TAG        0.8.0
+)
+FetchContent_MakeAvailable(yaml-cpp)
+
 add_executable(markit
   src/main.cpp
   src/scroller.cpp
   src/markdown.cpp
+  src/config.cpp
 )
 target_link_libraries(markit
   PRIVATE ftxui::component
   PRIVATE ftxui::dom
   PRIVATE ftxui::screen
   PRIVATE md4c
+  PRIVATE yaml-cpp
 )
 target_include_directories(markit PRIVATE ${md4c_SOURCE_DIR}/src)
 
@@ -50,6 +63,8 @@ if (MARKIT_BUILD_TESTS)
       src/scroller.cpp
       src/markdown_test.cpp
       src/markdown.cpp
+      src/config_test.cpp
+      src/config.cpp
     )
     target_include_directories(markit-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(markit-tests
@@ -58,6 +73,7 @@ if (MARKIT_BUILD_TESTS)
       PRIVATE ftxui::screen
       PRIVATE GTest::gtest_main
       PRIVATE md4c
+      PRIVATE yaml-cpp
     )
     target_include_directories(markit-tests PRIVATE ${md4c_SOURCE_DIR}/src)
     add_test(NAME markit-tests COMMAND markit-tests)

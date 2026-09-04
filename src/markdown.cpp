@@ -22,28 +22,6 @@ std::string Attr(const MD_ATTRIBUTE& attr) {
   return attr.text ? std::string(attr.text, attr.size) : std::string();
 }
 
-Decorator LinkStyle(const std::string& href) {
-  return ftxui::color(Color::CyanLight) | ftxui::underlined |
-         ftxui::hyperlink(href);
-}
-
-Decorator InlineCodeStyle() {
-  return ftxui::color(Color::Green) | ftxui::bgcolor(Color::GrayDark);
-}
-
-Color HeadingColor(unsigned level) {
-  switch (level) {
-    case 1:
-      return Color::Red;
-    case 2:
-      return Color::Yellow;
-    case 3:
-      return Color::Green;
-    default:
-      return Color::CyanLight;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Renderer: converts md4c SAX events into an FTXUI element tree.
 //
@@ -55,7 +33,8 @@ Color HeadingColor(unsigned level) {
 
 class Renderer {
  public:
-  explicit Renderer(std::string markdown) : source_(std::move(markdown)) {}
+  explicit Renderer(std::string markdown, const Theme& theme)
+      : source_(std::move(markdown)), theme_(theme) {}
 
   Element Run() {
     MD_PARSER parser = {};
@@ -304,7 +283,7 @@ class Renderer {
         Elements rows;
         for (auto& c : top.children) {
           rows.push_back(ftxui::hbox({
-              ftxui::text("│ ") | ftxui::color(Color::GrayDark),
+              ftxui::text("│ ") | ftxui::color(theme_.quote_marker),
               std::move(c),
           }));
         }
@@ -489,7 +468,7 @@ class Renderer {
 
   // ---- finalizers ---------------------------------------------------------
 
-  static Element CodeElement(const std::string& code) {
+  Element CodeElement(const std::string& code) {
     std::vector<std::string> lines;
     std::string cur;
     for (char c : code) {
@@ -505,16 +484,16 @@ class Renderer {
     }
     Elements rows;
     for (auto& l : lines) {
-      rows.push_back(ftxui::text(l) | ftxui::color(Color::GrayLight));
+      rows.push_back(ftxui::text(l) | ftxui::color(theme_.code_block_fg));
     }
     if (rows.empty()) {
       rows.push_back(ftxui::text(""));
     }
-    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(Color::GrayDark) |
+    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme_.code_block_bg) |
            ftxui::borderLight;
   }
 
-  static Element TableElement(
+  Element TableElement(
       const std::vector<std::pair<bool, std::vector<Element>>>& rows) {
     if (rows.empty()) {
       return ftxui::text("");
@@ -556,15 +535,40 @@ class Renderer {
     return ftxui::vbox(std::move(rows_el)) | ftxui::borderLight;
   }
 
+  // --- Theme-styled helpers --------------------------------------------------
+
+  Decorator LinkStyle(const std::string& href) {
+    return ftxui::color(theme_.link) | ftxui::underlined | ftxui::hyperlink(href);
+  }
+
+  Decorator InlineCodeStyle() {
+    return ftxui::color(theme_.inline_code_fg) |
+           ftxui::bgcolor(theme_.inline_code_bg);
+  }
+
+  Color HeadingColor(unsigned level) {
+    switch (level) {
+      case 1:
+        return theme_.heading_h1;
+      case 2:
+        return theme_.heading_h2;
+      case 3:
+        return theme_.heading_h3;
+      default:
+        return theme_.heading_h4;
+    }
+  }
+
   std::string source_;
+  const Theme& theme_;
   std::vector<Frame> frames_;
   std::vector<Decorator> span_decorators_;
 };
 
 }  // namespace
 
-Element RenderMarkdown(const std::string& markdown) {
-  return Renderer(markdown).Run();
+Element RenderMarkdown(const std::string& markdown, const Theme& theme) {
+  return Renderer(markdown, theme).Run();
 }
 
 }  // namespace markit
