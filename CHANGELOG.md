@@ -14,3 +14,12 @@ Change tag:
 2026-09-03T22:57:51Z - add - FTXUI README (827-line test content)
 2026-09-03T22:57:51Z - add - Top-anchored Scroller pager with gtest functional tests
 2026-09-03T22:57:51Z - mod - Remove heading blank line
+
+0.0.2 - 2026-09-04T02:30:14Z
+2026-09-04T02:30:14Z - mod - Fix first-frame event race and add terminal resize support (viewport_height is Ref<int>)
+2026-09-04T02:30:14Z - add - Milestone 2: markdown parsing & rendering via md4c (headings, emphasis, code, quote, lists/task-lists, links, tables, HR)
+2026-09-04T02:30:14Z - add - Markdown renderer functional tests (gtest)
+2026-09-04T02:30:14Z - mod - Pin BUILD_SHARED_LIBS=OFF so markit links FTXUI/md4c statically (binary stayed ~1.7-2.2MB instead of shrinking to 280KB)
+2026-09-04T02:30:14Z - mod - Fix frame-stack desync dropping list item text after preceding blocks; add table column gutter
+
+2026-09-04T03:35:53Z - mod - Review fixes: null-safe Attr, decorator composition via composable operator|, permissive autolinks, per-table header (thead) row tracking, per-cell alignment, empty-cell table width floor
