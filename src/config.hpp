@@ -1,6 +1,7 @@
 #ifndef MARKIT_CONFIG_HPP
 #define MARKIT_CONFIG_HPP
 
+#include <iosfwd>
 #include <optional>
 #include <string>
 
@@ -36,6 +37,11 @@ std::string DefaultConfigPath();
 //  - Parse error or schema violation: throws std::runtime_error whose message
 //    includes the offending key path, value, and a description.
 Theme LoadConfig(const std::string& path);
+
+// Write the default Theme as a human-readable YAML document to `out`, including
+// a commented header explaining the supported color values (named colors and
+// hex truecolor strings). Useful with `markit --dump-config > file`.
+void DumpDefaultConfig(std::ostream& out);
 
 }  // namespace markit
 

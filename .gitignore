@@ -58,6 +58,10 @@ compile_commands.json
 *.bak
 *.swp
 
+# Local test scratch directory (keep .gitkeep only)
+tmp/*
+!tmp/.gitkeep
+
 # vcpkg
 vcpkg_installed/
 

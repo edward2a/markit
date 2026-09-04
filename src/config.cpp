@@ -219,4 +219,47 @@ Theme LoadConfig(const std::string& path) {
   return theme;
 }
 
+// Map a named Color back to its canonical lowercase name, used when emitting
+// the default config. Returns an empty string for non-palette colors (which
+// the default theme never contains).
+std::string ColorName(ftxui::Color color) {
+  for (const auto& [name, c] : NamedColors()) {
+    if (c == color) {
+      return name;
+    }
+  }
+  return std::string();
+}
+
+void DumpDefaultConfig(std::ostream& out) {
+  out << "# markit color scheme configuration\n"
+      << "#\n"
+      << "# Every color value may be either:\n"
+      << "#   - a named palette color (case-insensitive):\n"
+      << "#       black, red, green, yellow, blue, magenta, cyan, white,\n"
+      << "#       redlight, greenlight, yellowlight, bluelight, magentalight,\n"
+      << "#       cyanlight, graylight, graydark\n"
+      << "#   - a hex truecolor string:\n"
+      << "#       #rrggbb  (e.g. #ff8000)\n"
+      << "#       #rgb     (shorthand, e.g. #f80)\n"
+      << "#\n"
+      << "# Unset keys fall back to these defaults. To customize, edit a value,\n"
+      << "# then run:\n"
+      << "#     markit --config <path>\n"
+      << "theme:\n"
+      << "  heading:        # heading colors per level\n"
+      << "    h1: " << ColorName(Theme{}.heading_h1) << "\n"
+      << "    h2: " << ColorName(Theme{}.heading_h2) << "\n"
+      << "    h3: " << ColorName(Theme{}.heading_h3) << "\n"
+      << "    h4: " << ColorName(Theme{}.heading_h4) << "\n"
+      << "  link: " << ColorName(Theme{}.link) << "\n"
+      << "  inline_code:    # inline `code` text\n"
+      << "    fg: " << ColorName(Theme{}.inline_code_fg) << "\n"
+      << "    bg: " << ColorName(Theme{}.inline_code_bg) << "\n"
+      << "  code_block:     # fenced ``` code blocks\n"
+      << "    fg: " << ColorName(Theme{}.code_block_fg) << "\n"
+      << "    bg: " << ColorName(Theme{}.code_block_bg) << "\n"
+      << "  quote_marker: " << ColorName(Theme{}.quote_marker) << "\n";
+}
+
 }  // namespace markit

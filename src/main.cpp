@@ -20,6 +20,7 @@ using namespace ftxui;
 int main(int argc, char** argv) {
   std::string debug_file;
   std::string config_file;
+  bool dump_config = false;
   const char* input_file = nullptr;
 
   for (int i = 1; i < argc; ++i) {
@@ -28,6 +29,8 @@ int main(int argc, char** argv) {
       config_file = argv[++i];
     } else if (arg == "--debug" && i + 1 < argc) {
       debug_file = argv[++i];
+    } else if (arg == "--dump-config") {
+      dump_config = true;
     } else if (input_file == nullptr) {
       input_file = argv[i];
     } else {
@@ -36,8 +39,14 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (dump_config) {
+    markit::DumpDefaultConfig(std::cout);
+    return EXIT_SUCCESS;
+  }
+
   if (input_file == nullptr) {
-    std::cerr << "usage: markit [--debug <file>] [--config <file>] <file>\n";
+    std::cerr << "usage: markit [--debug <file>] [--config <file>]"
+                 " [--dump-config] <file>\n";
     return EXIT_FAILURE;
   }
 
