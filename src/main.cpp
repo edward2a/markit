@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
 
+#include "markdown.hpp"
 #include "scroller.hpp"
 
 using namespace ftxui;
@@ -41,14 +43,11 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  std::vector<std::string> lines;
-  std::string line;
-  while (std::getline(file, line)) {
-    lines.push_back(line);
-  }
+  std::string contents((std::istreambuf_iterator<char>(file)),
+                       std::istreambuf_iterator<char>());
 
-  if (lines.empty()) {
-    lines.push_back("(empty file)");
+  if (contents.empty()) {
+    contents = "(empty file)";
   }
 
   std::ofstream debug;
@@ -67,13 +66,7 @@ int main(int argc, char** argv) {
     }
   };
 
-  auto content = Renderer([&] {
-    Elements elements;
-    for (const auto& l : lines) {
-      elements.push_back(text(l));
-    }
-    return vbox(std::move(elements));
-  });
+  auto content = Renderer([&] { return markit::RenderMarkdown(contents); });
 
   int selected = 0;
   int viewport_height = Terminal::Size().dimy;
