@@ -23,3 +23,9 @@ Change tag:
 2026-09-04T02:30:14Z - mod - Fix frame-stack desync dropping list item text after preceding blocks; add table column gutter
 
 2026-09-04T03:35:53Z - mod - Review fixes: null-safe Attr, decorator composition via composable operator|, permissive autolinks, per-table header (thead) row tracking, per-cell alignment, empty-cell table width floor
+
+0.0.3 - 2026-09-04T05:58:08Z
+2026-09-04T05:58:08Z - add - Milestone 3: YAML config file for color scheme (Theme struct, named/hex colors, embedded schema validation, --config flag, default at ~/.config/markit/markit.yml)
+2026-09-04T05:58:08Z - add - Config parsing/schema-validation tests (config_test.cpp)
+2026-09-04T05:58:08Z - mod - Thread Theme through RenderMarkdown; replace hardcoded colors with theme values
+2026-09-04T05:58:08Z - mod - Add yaml-cpp via FetchContent (0.8.0) with CMAKE_POLICY_VERSION_MINIMUM for CMake 4

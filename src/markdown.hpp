@@ -11,12 +11,16 @@
 
 #include <ftxui/dom/elements.hpp>  // for Element
 
+#include "config.hpp"  // for Theme
+
 namespace markit {
 
 /// @brief Parse @p markdown and render it into an FTXUI Element.
 /// @param markdown UTF-8 markdown source text.
+/// @param theme Color scheme to apply; defaults to the built-in scheme.
 /// @return A `vbox` Element suitable for display in the scroller.
-ftxui::Element RenderMarkdown(const std::string& markdown);
+ftxui::Element RenderMarkdown(const std::string& markdown,
+                              const Theme& theme = Theme{});
 
 }  // namespace markit
 

@@ -11,6 +11,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
 
+#include "config.hpp"
 #include "markdown.hpp"
 #include "scroller.hpp"
 
@@ -18,11 +19,14 @@ using namespace ftxui;
 
 int main(int argc, char** argv) {
   std::string debug_file;
+  std::string config_file;
   const char* input_file = nullptr;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg == "--debug" && i + 1 < argc) {
+    if (arg == "--config" && i + 1 < argc) {
+      config_file = argv[++i];
+    } else if (arg == "--debug" && i + 1 < argc) {
       debug_file = argv[++i];
     } else if (input_file == nullptr) {
       input_file = argv[i];
@@ -33,7 +37,17 @@ int main(int argc, char** argv) {
   }
 
   if (input_file == nullptr) {
-    std::cerr << "usage: markit [--debug <file>] <file>\n";
+    std::cerr << "usage: markit [--debug <file>] [--config <file>] <file>\n";
+    return EXIT_FAILURE;
+  }
+
+  const std::string config_path =
+      config_file.empty() ? markit::DefaultConfigPath() : config_file;
+  markit::Theme theme;
+  try {
+    theme = markit::LoadConfig(config_path);
+  } catch (const std::exception& e) {
+    std::cerr << e.what() << "\n";
     return EXIT_FAILURE;
   }
 
@@ -66,7 +80,7 @@ int main(int argc, char** argv) {
     }
   };
 
-  auto content = Renderer([&] { return markit::RenderMarkdown(contents); });
+  auto content = Renderer([&] { return markit::RenderMarkdown(contents, theme); });
 
   int selected = 0;
   int viewport_height = Terminal::Size().dimy;
