@@ -18,7 +18,8 @@ using ftxui::Element;
 using ftxui::Elements;
 
 std::string Attr(const MD_ATTRIBUTE& attr) {
-  return std::string(attr.text, attr.size);
+  // md4c attribute text is not null-terminated and may be absent (NULL).
+  return attr.text ? std::string(attr.text, attr.size) : std::string();
 }
 
 Decorator LinkStyle(const std::string& href) {
@@ -59,7 +60,8 @@ class Renderer {
   Element Run() {
     MD_PARSER parser = {};
     parser.abi_version = 0;
-    parser.flags = MD_DIALECT_GITHUB;
+    parser.flags =
+        MD_DIALECT_GITHUB | MD_FLAG_PERMISSIVEAUTOLINKS;
 
     frames_.push_back(Frame{Kind::Doc, 0, 0, false});
     parser.enter_block = &Renderer::cb_enter_block;
@@ -104,11 +106,13 @@ class Renderer {
     unsigned heading_level;
     unsigned col_count;           // table column count
     bool is_header_row;           // row belongs to thead
+    bool in_thead = false;        // enclosing Table: within <thead> section
     bool is_task = false;
     char task_mark = ' ';
     char bullet = 0;              // ul marker; 0 means ordered
     unsigned ordered_index = 0;
     char ordered_mark = '.';
+    char cell_align = 0;          // MD_ALIGN value for a table cell
     std::vector<Element> children;
     std::vector<Fragment> inline_;
     std::string text;              // verbatim buffer (code/html)
@@ -137,13 +141,10 @@ class Renderer {
 
   Decorator ComposedStyle() const {
     Decorator result = nullptr;
+    // Decorators are composable; `a | b` yields b(a(e)), so the rightmost
+    // (last-entered) decorator is applied outermost, matching span nesting.
     for (const auto& d : span_decorators_) {
-      if (result == nullptr) {
-        result = d;
-      } else {
-        Decorator outer = result;
-        result = [outer, d](Element e) { return d(outer(std::move(e))); };
-      }
+      result = (result == nullptr) ? d : (result | d);
     }
     return result;
   }
@@ -249,16 +250,32 @@ class Renderer {
         break;
       }
       case MD_BLOCK_THEAD:
-      case MD_BLOCK_TBODY:
+      case MD_BLOCK_TBODY: {
+        // Record the section on the enclosing Table frame so nested tables
+        // don't clobber an outer table's state.
+        Frame* t = nullptr;
+        for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
+          if (it->kind == Kind::Table) {
+            t = &*it;
+            break;
+          }
+        }
+        if (t) {
+          t->in_thead = (type == MD_BLOCK_THEAD);
+        }
         break;
-      case MD_BLOCK_TR:
-        Push(Frame{Kind::Row, 0, 0, true});
+      }
+      case MD_BLOCK_TR: {
+        Frame& table = Top();
+        bool is_header = table.kind == Kind::Table && table.in_thead;
+        Push(Frame{Kind::Row, 0, 0, is_header});
         break;
+      }
       case MD_BLOCK_TH:
       case MD_BLOCK_TD: {
         auto* td = static_cast<MD_BLOCK_TD_DETAIL*>(detail);
         Frame f{Kind::Cell, 0, 0, type == MD_BLOCK_TH};
-        f.ordered_mark = static_cast<char>(td->align);
+        f.cell_align = static_cast<char>(td->align);
         Push(std::move(f));
         break;
       }
@@ -359,9 +376,28 @@ class Renderer {
       case MD_BLOCK_TD: {
         Frame top = Pop();
         Frame& row = Top();
-        if (row.kind == Kind::Row) {
-          row.cells.push_back(FlattenInline(top));
+        if (row.kind != Kind::Row) {
+          return 1;  // stack desync; abort.
         }
+        // Combine direct inline text with any nested block content.
+        Elements parts;
+        bool has_inline = !top.inline_.empty();
+        Element inline_el = FlattenInline(top);
+        if (has_inline) {
+          parts.push_back(std::move(inline_el));
+        }
+        for (auto& c : top.children) {
+          parts.push_back(std::move(c));
+        }
+        Element cell = parts.empty()
+                           ? ftxui::text("")
+                           : ftxui::vbox(std::move(parts));
+        if (top.cell_align == 2) {
+          cell = ftxui::hcenter(cell);
+        } else if (top.cell_align == 3) {
+          cell = ftxui::align_right(cell);
+        }
+        row.cells.push_back(std::move(cell));
         break;
       }
       case MD_BLOCK_THEAD:
@@ -490,8 +526,8 @@ class Renderer {
       for (const auto& cell : cells) {
         if (i < columns) {
           auto req = cell->requirement();
-          widths[i] =
-              std::max(widths[i], static_cast<unsigned>(req.min_x));
+          widths[i] = std::max(widths[i], static_cast<unsigned>(
+                                               std::max<int>(req.min_x, 1)));
         }
         ++i;
       }
