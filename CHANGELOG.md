@@ -21,3 +21,5 @@ Change tag:
 2026-09-04T02:30:14Z - add - Markdown renderer functional tests (gtest)
 2026-09-04T02:30:14Z - mod - Pin BUILD_SHARED_LIBS=OFF so markit links FTXUI/md4c statically (binary stayed ~1.7-2.2MB instead of shrinking to 280KB)
 2026-09-04T02:30:14Z - mod - Fix frame-stack desync dropping list item text after preceding blocks; add table column gutter
+
+2026-09-04T03:35:53Z - mod - Review fixes: null-safe Attr, decorator composition via composable operator|, permissive autolinks, per-table header (thead) row tracking, per-cell alignment, empty-cell table width floor
