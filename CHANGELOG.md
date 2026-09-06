@@ -39,3 +39,7 @@ Change tag:
 - 2026-09-06T16:56:04Z - mod - Fix list markers: unordered/ordered marker fields were misaligned in Frame aggregate initialization (bullets showed as numbers); set fields explicitly and add marker assertions to list tests
 - 2026-09-06T17:41:24Z - mod - Fix hard-break rendering: trailing-space hard breaks now split paragraphs into one row per source line instead of a "\n" text node that inflated the row height and made inline-code background colors bleed into the line below
 - 2026-09-06T17:53:41Z - mod - Fix inline-code background extending full screen width: FlattenInline now always returns an hbox (even for a single fragment), so a lone styled span is width-constrained instead of painting a bare vbox child full-row background
+
+## 0.0.4 - 2026-09-06T18:23:47Z
+
+- 2026-09-06T18:16:33Z - mod - Milestone 4 Phase 1: refactor config to load/dump a full Config container (Config wraps Theme) instead of the Theme alone; renderer still receives cfg.theme, CLI behavior unchanged

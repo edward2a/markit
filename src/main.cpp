@@ -78,9 +78,9 @@ int main(int argc, char** argv) {
 
   const std::string config_path =
       config_file.empty() ? markit::DefaultConfigPath() : config_file;
-  markit::Theme theme;
+  markit::Config cfg;
   try {
-    theme = markit::LoadConfig(config_path);
+    cfg = markit::LoadConfig(config_path);
   } catch (const std::exception& e) {
     std::cerr << e.what() << "\n";
     return EXIT_FAILURE;
@@ -115,7 +115,7 @@ int main(int argc, char** argv) {
     }
   };
 
-  auto content = Renderer([&] { return markit::RenderMarkdown(contents, theme); });
+  auto content = Renderer([&] { return markit::RenderMarkdown(contents, cfg.theme); });
 
   int selected = 0;
   int viewport_height = Terminal::Size().dimy;

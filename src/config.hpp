@@ -24,6 +24,13 @@ struct Theme {
   ftxui::Color quote_marker = ftxui::Color::GrayDark;
 };
 
+// Top-level settings container. Additional per-area settings (e.g. a future
+// `display:` section) are added beside `theme`; dump/load operate on the whole
+// Config, not just the color scheme.
+struct Config {
+  Theme theme;
+};
+
 // Parse a color string: a named FTXUI Palette16 color (case-insensitive) or a
 // hex truecolor string "#rrggbb" / "#rgb". Returns nullopt on any failure.
 std::optional<ftxui::Color> ParseColor(const std::string& s);
@@ -33,14 +40,14 @@ std::optional<ftxui::Color> ParseColor(const std::string& s);
 std::string DefaultConfigPath();
 
 // Load and validate the config file at `path`.
-//  - Missing file (or empty path): returns the default Theme (silently).
+//  - Missing file (or empty path): returns the default Config (silently).
 //  - Parse error or schema violation: throws std::runtime_error whose message
 //    includes the offending key path, value, and a description.
-Theme LoadConfig(const std::string& path);
+Config LoadConfig(const std::string& path);
 
-// Write the default Theme as a human-readable YAML document to `out`, including
-// a commented header explaining the supported color values (named colors and
-// hex truecolor strings). Useful with `markit --dump-config > file`.
+// Write the default Config as a human-readable YAML document to `out`,
+// including a commented header explaining the supported color values (named
+// colors and hex truecolor strings). Useful with `markit --dump-config > file`.
 void DumpDefaultConfig(std::ostream& out);
 
 }  // namespace markit

@@ -64,8 +64,9 @@ TEST(Config, ParseColor_Invalid) {
 }
 
 TEST(Config, LoadConfig_MissingFileReturnsDefaults) {
-  const markit::Theme t =
+  const markit::Config cfg =
       markit::LoadConfig("/nonexistent/markit-missing.yml");
+  const markit::Theme& t = cfg.theme;
   EXPECT_EQ(t.heading_h1, ftxui::Color::Red);
   EXPECT_EQ(t.link, ftxui::Color::CyanLight);
   EXPECT_EQ(t.inline_code_fg, ftxui::Color::Green);
@@ -76,8 +77,17 @@ TEST(Config, LoadConfig_MissingFileReturnsDefaults) {
 }
 
 TEST(Config, LoadConfig_EmptyPathReturnsDefaults) {
-  const markit::Theme t = markit::LoadConfig("");
-  EXPECT_EQ(t.heading_h1, ftxui::Color::Red);
+  const markit::Config cfg = markit::LoadConfig("");
+  EXPECT_EQ(cfg.theme.heading_h1, ftxui::Color::Red);
+}
+
+// A default-constructed Config mirrors the built-in theme: load/dump operate
+// on the whole config container, not just the color scheme.
+TEST(Config, Config_WrapsTheme) {
+  const markit::Config defaults;
+  EXPECT_EQ(defaults.theme.heading_h1, ftxui::Color::Red);
+  EXPECT_EQ(defaults.theme.inline_code_bg, ftxui::Color::GrayDark);
+  EXPECT_EQ(defaults.theme.quote_marker, ftxui::Color::GrayDark);
 }
 
 TEST(Config, LoadConfig_PartialOverride) {
@@ -86,7 +96,8 @@ TEST(Config, LoadConfig_PartialOverride) {
       "  link: yellow\n"
       "  heading:\n"
       "    h1: '#ff0000'\n");
-  const markit::Theme t = markit::LoadConfig(path);
+  const markit::Config cfg = markit::LoadConfig(path);
+  const markit::Theme& t = cfg.theme;
   EXPECT_EQ(t.link, ftxui::Color::Yellow);
   EXPECT_EQ(t.heading_h1, ftxui::Color::RGB(0xff, 0x00, 0x00));
   // Unset fields keep defaults.
@@ -105,7 +116,8 @@ TEST(Config, LoadConfig_NamedAndHex) {
       "    fg: '#c0c0c0'\n"
       "    bg: graydark\n"
       "  quote_marker: blue\n");
-  const markit::Theme t = markit::LoadConfig(path);
+  const markit::Config cfg = markit::LoadConfig(path);
+  const markit::Theme& t = cfg.theme;
   EXPECT_EQ(t.inline_code_fg, ftxui::Color::Green);
   EXPECT_EQ(t.inline_code_bg, ftxui::Color::RGB(0x20, 0x20, 0x20));
   EXPECT_EQ(t.code_block_fg, ftxui::Color::RGB(0xc0, 0xc0, 0xc0));

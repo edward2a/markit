@@ -200,23 +200,23 @@ std::string DefaultConfigPath() {
   return std::string(home) + "/.config/markit/markit.yml";
 }
 
-Theme LoadConfig(const std::string& path) {
-  Theme theme;
+Config LoadConfig(const std::string& path) {
+  Config cfg;
 
   if (path.empty()) {
-    return theme;
+    return cfg;
   }
   std::ifstream exists(path);
   if (!exists.is_open()) {
-    return theme;  // missing config: silently use defaults
+    return cfg;  // missing config: silently use defaults
   }
   exists.close();
 
   YAML::Node root = YAML::LoadFile(path);
   if (root["theme"].IsDefined()) {
-    ValidateTheme(root["theme"], theme);
+    ValidateTheme(root["theme"], cfg.theme);
   }
-  return theme;
+  return cfg;
 }
 
 // Map a named Color back to its canonical lowercase name, used when emitting
@@ -232,7 +232,7 @@ std::string ColorName(ftxui::Color color) {
 }
 
 void DumpDefaultConfig(std::ostream& out) {
-  out << "# markit color scheme configuration\n"
+  out << "# markit configuration\n"
       << "#\n"
       << "# Every color value may be either:\n"
       << "#   - a named palette color (case-insensitive):\n"
