@@ -90,6 +90,46 @@ TEST(Config, Config_WrapsTheme) {
   EXPECT_EQ(defaults.theme.quote_marker, ftxui::Color::GrayDark);
 }
 
+// The default display mode is Wrap (user decision Q1) and survives load.
+TEST(Config, LoadConfig_DefaultWrapMode) {
+  EXPECT_EQ(markit::LoadConfig("").horizontal_wrap, markit::WrapMode::Wrap);
+  const markit::Config cfg = markit::LoadConfig("/nonexistent/markit-missing.yml");
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);
+}
+
+TEST(Config, LoadConfig_DisplayScrollExplicit) {
+  const std::string path = TempYaml("display:\n  horizontal: scroll\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Scroll);
+  EXPECT_EQ(cfg.theme.heading_h1, ftxui::Color::Red);  // theme untouched
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_DisplayWrapExplicit) {
+  const std::string path = TempYaml("display:\n  horizontal: wrap\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_DisplayInvalidValueThrows) {
+  const std::string path = TempYaml("display:\n  horizontal: sideways\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_DisplayUnknownKeyThrows) {
+  const std::string path = TempYaml("display:\n  vertical: wrap\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_UnknownTopLevelSectionThrows) {
+  const std::string path = TempYaml("sidebar:\n  width: 30\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
 TEST(Config, LoadConfig_PartialOverride) {
   const std::string path = TempYaml(
       "theme:\n"
@@ -207,6 +247,14 @@ TEST(Config, DumpDefaultConfig_RoundTripMatchesDefaults) {
   EXPECT_EQ(dumped.code_block_fg, defaults.code_block_fg);
   EXPECT_EQ(dumped.code_block_bg, defaults.code_block_bg);
   EXPECT_EQ(dumped.quote_marker, defaults.quote_marker);
+
+  // The display section round-trips: the dumped document reloads to the
+  // default Wrap mode.
+  const std::string h = root["display"]["horizontal"].Scalar();
+  const std::string path = TempYaml(h == "wrap" ? "display:\n  horizontal: wrap\n"
+                                                 : "display:\n  horizontal: scroll\n");
+  EXPECT_EQ(markit::LoadConfig(path).horizontal_wrap, markit::Config{}.horizontal_wrap);
+  std::remove(path.c_str());
 }
 
 }  // namespace

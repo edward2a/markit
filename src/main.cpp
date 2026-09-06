@@ -78,9 +78,9 @@ int main(int argc, char** argv) {
 
   const std::string config_path =
       config_file.empty() ? markit::DefaultConfigPath() : config_file;
-  markit::Config cfg;
+  markit::Config config;
   try {
-    cfg = markit::LoadConfig(config_path);
+    config = markit::LoadConfig(config_path);
   } catch (const std::exception& e) {
     std::cerr << e.what() << "\n";
     return EXIT_FAILURE;
@@ -115,13 +115,22 @@ int main(int argc, char** argv) {
     }
   };
 
-  auto content = Renderer([&] { return markit::RenderMarkdown(contents, cfg.theme); });
+  // Display mode state: rendered from `content_cfg`, toggled live with `w`;
+  // `hscroll` tells the scroller to enable horizontal panning (scroll mode).
+  markit::Config content_cfg = config;
+  bool hscroll = (config.horizontal_wrap == markit::WrapMode::Scroll);
+
+  auto content = Renderer(
+      [&] { return markit::RenderMarkdown(contents, content_cfg); });
 
   int selected = 0;
+  int selected_x = 0;
   int viewport_height = Terminal::Size().dimy;
+  int viewport_width = Terminal::Size().dimx;
   auto scroller =
       Scroller(std::move(content), &selected, &viewport_height,
-               [&](int before, int after) { log("scroll", before, after); });
+               [&](int before, int after) { log("scroll", before, after); },
+               &selected_x, &viewport_width, &hscroll);
 
   auto screen = App::Fullscreen();
   auto component = CatchEvent(scroller, [&](Event event) -> bool {
@@ -133,6 +142,14 @@ int main(int argc, char** argv) {
 
     if (event == Event::q || event == Event::Escape || event == Event::CtrlC) {
       screen.Exit();
+      return true;
+    }
+    if (event == Event::Character('w')) {
+      hscroll = !hscroll;
+      content_cfg.horizontal_wrap =
+          hscroll ? markit::WrapMode::Scroll : markit::WrapMode::Wrap;
+      selected_x = 0;  // re-anchor horizontally on mode switch.
+      log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
     return false;

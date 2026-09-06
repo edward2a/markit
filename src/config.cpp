@@ -162,6 +162,45 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
   }
 }
 
+// Validate the top-level `display` mapping against the embedded schema,
+// filling `cfg` with the values found (unset fields keep their defaults). Any
+// unknown key or unparseable value throws std::runtime_error with a dotted
+// path, matching the theme validation style.
+void ValidateDisplay(const YAML::Node& display, Config& cfg) {
+  static const std::unordered_map<std::string, bool> kKnown = {
+      {"horizontal", true},
+  };
+
+  if (!display.IsMap()) {
+    throw std::runtime_error(
+        "config: display: expected a mapping of display settings");
+  }
+
+  for (auto it = display.begin(); it != display.end(); ++it) {
+    const std::string key = it->first.Scalar();
+    const YAML::Node value = it->second;
+
+    if (key == "horizontal") {
+      if (!value.IsScalar()) {
+        throw std::runtime_error(
+            "config: display.horizontal: expected a string (wrap or scroll)");
+      }
+      const std::string mode = Lowercase(value.Scalar());
+      if (mode == "wrap") {
+        cfg.horizontal_wrap = WrapMode::Wrap;
+      } else if (mode == "scroll") {
+        cfg.horizontal_wrap = WrapMode::Scroll;
+      } else {
+        throw std::runtime_error(
+            "config: display.horizontal: invalid value '" + value.Scalar() +
+            "' (expected 'wrap' or 'scroll')");
+      }
+    } else if (kKnown.count(key) == 0) {
+      throw std::runtime_error("config: display." + key + ": unknown key");
+    }
+  }
+}
+
 }  // namespace
 
 std::optional<ftxui::Color> ParseColor(const std::string& in) {
@@ -213,8 +252,20 @@ Config LoadConfig(const std::string& path) {
   exists.close();
 
   YAML::Node root = YAML::LoadFile(path);
+
+  // Validate top-level keys (strict, matching the theme-style schema).
+  for (auto it = root.begin(); it != root.end(); ++it) {
+    const std::string key = it->first.Scalar();
+    if (key != "theme" && key != "display") {
+      throw std::runtime_error("config: " + key + ": unknown top-level key");
+    }
+  }
+
   if (root["theme"].IsDefined()) {
     ValidateTheme(root["theme"], cfg.theme);
+  }
+  if (root["display"].IsDefined()) {
+    ValidateDisplay(root["display"], cfg);
   }
   return cfg;
 }
@@ -259,7 +310,12 @@ void DumpDefaultConfig(std::ostream& out) {
       << "  code_block:     # fenced ``` code blocks\n"
       << "    fg: " << ColorName(Theme{}.code_block_fg) << "\n"
       << "    bg: " << ColorName(Theme{}.code_block_bg) << "\n"
-      << "  quote_marker: " << ColorName(Theme{}.quote_marker) << "\n";
+      << "  quote_marker: " << ColorName(Theme{}.quote_marker) << "\n"
+      << "display:\n"
+      << "  horizontal: " << (Config{}.horizontal_wrap == WrapMode::Scroll
+                                  ? "scroll"
+                                  : "wrap")
+      << "\n";
 }
 
 }  // namespace markit

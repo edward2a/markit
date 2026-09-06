@@ -17,10 +17,11 @@ namespace markit {
 
 /// @brief Parse @p markdown and render it into an FTXUI Element.
 /// @param markdown UTF-8 markdown source text.
-/// @param theme Color scheme to apply; defaults to the built-in scheme.
+/// @param config App settings: color theme and display mode. The default
+///        config wraps text to the viewport width.
 /// @return A `vbox` Element suitable for display in the scroller.
 ftxui::Element RenderMarkdown(const std::string& markdown,
-                              const Theme& theme = Theme{});
+                              const Config& config = Config{});
 
 }  // namespace markit
 

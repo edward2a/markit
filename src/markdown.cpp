@@ -33,8 +33,10 @@ std::string Attr(const MD_ATTRIBUTE& attr) {
 
 class Renderer {
  public:
-  explicit Renderer(std::string markdown, const Theme& theme)
-      : source_(std::move(markdown)), theme_(theme) {}
+  explicit Renderer(std::string markdown, const Config& config)
+      : source_(std::move(markdown)),
+        theme_(config.theme),
+        wrap_(config.horizontal_wrap == WrapMode::Wrap) {}
 
   Element Run() {
     MD_PARSER parser = {};
@@ -143,22 +145,107 @@ class Renderer {
     top.inline_.push_back(Fragment{text, ComposedStyle()});
   }
 
+  // Split a row's fragments into word elements for wrap mode. A "word" is a
+  // maximal run of non-space text; it may span several styled fragments (e.g.
+  // `[a](url)b`), whose pieces are glued into one element so the wrap layout
+  // never breaks inside a word. Inter-word spaces are attached as a prefix to
+  // the following word, so the wrapping point lands exactly at the source's
+  // whitespace.
+  Element WrapRow(std::vector<Fragment>& fragments) {
+    using Piece = std::pair<std::string, Decorator>;  // text, style
+    Elements words;
+    std::vector<Piece> cur;
+    std::string pending;
+
+    auto finish = [&]() {
+      if (cur.empty()) {
+        return;
+      }
+      if (cur.size() == 1) {
+        Element e = ftxui::text(std::move(cur[0].first));
+        if (cur[0].second) {
+          e = cur[0].second(std::move(e));
+        }
+        words.push_back(std::move(e));
+      } else {
+        Elements pieces;
+        for (auto& piece : cur) {
+          Element e = ftxui::text(std::move(piece.first));
+          if (piece.second) {
+            e = piece.second(std::move(e));
+          }
+          pieces.push_back(std::move(e));
+        }
+        words.push_back(ftxui::hbox(std::move(pieces)));
+      }
+      cur.clear();
+    };
+
+    auto is_space = [](char c) {
+      return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+
+    for (auto& frag : fragments) {
+      size_t i = 0;
+      const size_t n = frag.text.size();
+      while (i < n) {
+        if (is_space(frag.text[i])) {
+          size_t j = i;
+          while (j < n && is_space(frag.text[j])) {
+            ++j;
+          }
+          if (!cur.empty()) {
+            finish();
+          }
+          pending += frag.text.substr(i, j - i);  // inter-word whitespace
+          i = j;
+        } else {
+          size_t j = i;
+          while (j < n && !is_space(frag.text[j])) {
+            ++j;
+          }
+          std::string word = frag.text.substr(i, j - i);
+          if (!pending.empty()) {
+            // The inter-word whitespace stays a plain (unstyled) piece, glued
+            // ahead of the following word so the wrap point still lands on the
+            // source whitespace — but a link/emphasis/code style no longer
+            // decorates the space itself.
+            cur.emplace_back(std::move(pending), nullptr);
+            pending.clear();
+          }
+          cur.emplace_back(std::move(word), frag.style);
+          i = j;
+        }
+      }
+    }
+    finish();
+    return ftxui::hflow(std::move(words));
+  }
+
   Element FlattenInline(Frame& frame) {
+    std::vector<Fragment> fragments = std::move(frame.inline_);
+    frame.inline_.clear();
+    if (fragments.empty()) {
+      return ftxui::text("");
+    }
+
+    // Always box the fragments: without it, a lone styled span (e.g. an inline
+    // code row) becomes a direct vbox child and its background decorator
+    // paints the full row width instead of just the text. Wrap mode instead
+    // word-splits the fragments so the row reflows to the available width
+    // (table cells stay single-line regardless).
+    if (wrap_ && frame.kind != Kind::Cell) {
+      return WrapRow(fragments);
+    }
     Elements items;
-    for (auto& frag : frame.inline_) {
+    items.reserve(fragments.size());
+    for (auto& frag : fragments) {
       Element e = ftxui::text(std::move(frag.text));
       if (frag.style) {
         e = frag.style(std::move(e));
       }
       items.push_back(std::move(e));
     }
-    frame.inline_.clear();
-    if (items.empty()) {
-      return ftxui::text("");
-    }
-    // Always box the fragments: without it, a lone styled span (e.g. an inline
-    // code row) becomes a direct vbox child and its background decorator
-    // paints the full row width instead of just the text.
     return ftxui::hbox(std::move(items));
   }
 
@@ -362,7 +449,7 @@ class Renderer {
       case MD_BLOCK_CODE:
       case MD_BLOCK_HTML: {
         Frame top = Pop();
-        Attach(CodeElement(top.text), true);
+        Attach(CodeElement(top.text, wrap_), true);
         break;
       }
       case MD_BLOCK_TABLE: {
@@ -496,6 +583,11 @@ class Renderer {
         }
         break;
       }
+      case MD_TEXT_HTML:
+        // Raw HTML block/span markup: keep it verbatim inside the current
+        // Html frame (like code) so nothing is lost or misinterpreted.
+        Top().text += s;
+        break;
       default:
         break;
     }
@@ -504,7 +596,7 @@ class Renderer {
 
   // ---- finalizers ---------------------------------------------------------
 
-  Element CodeElement(const std::string& code) {
+  Element CodeElement(const std::string& code, bool wrap) {
     std::vector<std::string> lines;
     std::string cur;
     for (char c : code) {
@@ -518,15 +610,63 @@ class Renderer {
     if (!cur.empty() || code.empty()) {
       lines.push_back(cur);
     }
+
+    auto token_text = [this](std::string s) {
+      return ftxui::text(std::move(s)) | ftxui::color(theme_.code_block_fg);
+    };
+
     Elements rows;
+    rows.reserve(lines.size());
     for (auto& l : lines) {
-      rows.push_back(ftxui::text(l) | ftxui::color(theme_.code_block_fg));
+      if (!wrap || l.empty()) {
+        rows.push_back(token_text(l));
+        continue;
+      }
+      // Wrap mode: split the raw line into word elements (same prefix-glue as
+      // WrapRow: inter-word whitespace rides along with the following token,
+      // leading indentation stays with the first token), then hflow reflows
+      // the row at the available width.
+      Elements toks;
+      std::string pending;
+      size_t i = 0;
+      const size_t n = l.size();
+      while (i < n) {
+        if (l[i] == ' ' || l[i] == '\t') {
+          size_t j = i;
+          while (j < n && (l[j] == ' ' || l[j] == '\t')) {
+            ++j;
+          }
+          pending += l.substr(i, j - i);
+          i = j;
+        } else {
+          size_t j = i;
+          while (j < n && l[j] != ' ' && l[j] != '\t') {
+            ++j;
+          }
+          toks.push_back(token_text(pending + l.substr(i, j - i)));
+          pending.clear();
+          i = j;
+        }
+      }
+      if (toks.empty()) {
+        toks.push_back(token_text(""));
+      }
+      rows.push_back(ftxui::hflow(std::move(toks)));
     }
+
     if (rows.empty()) {
       rows.push_back(ftxui::text(""));
     }
-    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme_.code_block_bg) |
-           ftxui::borderLight;
+    // Wrap mode: the box spans the full content width and hflow reflows each
+    // line inside it. Scroll mode: the hbox wrapper makes the border hug the
+    // widest line (natural width) instead of stretching to the window, so the
+    // box clips/panes rather than reflowing.
+    auto boxed = ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme_.code_block_bg) |
+                 ftxui::borderLight;
+    if (wrap) {
+      return boxed;
+    }
+    return ftxui::hbox(boxed);
   }
 
   Element TableElement(
@@ -597,14 +737,15 @@ class Renderer {
 
   std::string source_;
   const Theme& theme_;
+  const bool wrap_;
   std::vector<Frame> frames_;
   std::vector<Decorator> span_decorators_;
 };
 
 }  // namespace
 
-Element RenderMarkdown(const std::string& markdown, const Theme& theme) {
-  return Renderer(markdown, theme).Run();
+Element RenderMarkdown(const std::string& markdown, const Config& config) {
+  return Renderer(markdown, config).Run();
 }
 
 }  // namespace markit

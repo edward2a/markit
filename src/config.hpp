@@ -24,11 +24,16 @@ struct Theme {
   ftxui::Color quote_marker = ftxui::Color::GrayDark;
 };
 
+// Horizontal overflow handling for block-level content that exceeds the
+// viewport width.
+enum class WrapMode { Wrap, Scroll };
+
 // Top-level settings container. Additional per-area settings (e.g. a future
 // `display:` section) are added beside `theme`; dump/load operate on the whole
 // Config, not just the color scheme.
 struct Config {
   Theme theme;
+  WrapMode horizontal_wrap = WrapMode::Wrap;
 };
 
 // Parse a color string: a named FTXUI Palette16 color (case-insensitive) or a
