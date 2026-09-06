@@ -334,3 +334,43 @@ TEST(Scroller, WrapModeReflowsLongCodeLines) {
   Prime(scroller);
   EXPECT_GT(VisibleRows(scroller), 3);
 }
+
+// A wrap -> scroll -> wrap round-trip at the same viewport width (mirroring
+// the app's `w` toggle, which also re-renders the content tree per mode)
+// keeps valid scroll bounds: the wrapped height matches the wrap tree.
+TEST(Scroller, WrapSurvivesModeToggleAtSameWidth) {
+  const char* md =
+      "```\nsome very long code line with many words beyond the narrow "
+      "viewport width that must wrap\n"
+      "a second long code line with many words beyond the narrow viewport\n"
+      "a third long code line with many words beyond the narrow viewport\n"
+      "```\n";
+  int selected = 0;
+  int viewport_height = kHeight;
+  int selected_x = 0;
+  int viewport_width = kWidth;
+  bool hscroll = false;
+  markit::Config cfg;
+  auto scroller = ftxui::Scroller(
+      ftxui::Renderer(
+          [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+  Prime(scroller);
+  const int wrap_rows = VisibleRows(scroller);
+  ASSERT_GT(wrap_rows, 3);
+
+  hscroll = true;  // scroll mode: single wide rows.
+  cfg.horizontal_wrap = markit::WrapMode::Scroll;
+  Prime(scroller);
+
+  hscroll = false;  // back to wrap at the same width.
+  cfg.horizontal_wrap = markit::WrapMode::Wrap;
+  Prime(scroller);
+  EXPECT_EQ(VisibleRows(scroller), wrap_rows);
+
+  // Navigation still clamps to the re-measured content.
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::End));
+  EXPECT_GE(selected, 0);
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::Home));
+  EXPECT_EQ(selected, 0);
+}

@@ -389,3 +389,43 @@ TEST(Markdown, CodeStaysSingleLineInScrollMode) {
   ASSERT_EQ(content_rows.size(), 1u);
   EXPECT_TRUE(content_rows[0].find("gggg") != std::string::npos);
 }
+
+// Inline raw HTML inside a paragraph renders verbatim with inline-code
+// styling instead of being silently dropped.
+TEST(Markdown, InlineHtmlInParagraphIsCodeStyled) {
+  ftxui::Screen screen(40, 4);
+  ftxui::Render(screen, markit::RenderMarkdown("a <kbd>x</kbd> b\n", {}));
+  int tag_col = -1;
+  for (int c = 0; c < 40; ++c) {
+    if (screen.CellAt(c, 0).character == "<") {
+      tag_col = c;
+      break;
+    }
+  }
+  ASSERT_GE(tag_col, 0) << "inline HTML must render verbatim";
+  EXPECT_EQ(screen.CellAt(tag_col, 0).foreground_color, ftxui::Color::Green);
+  EXPECT_EQ(screen.CellAt(tag_col, 0).background_color,
+            ftxui::Color::GrayDark);
+  EXPECT_FALSE(screen.CellAt(tag_col, 0).underlined);
+}
+
+// Overlong tokens are never split mid-word in wrap mode: a 40-column token
+// in a 20-column viewport clips instead of breaking.
+TEST(Markdown, OverlongTokenClipsInWrapMode) {
+  const std::string token(40, 'x');
+  const std::string md = "```\n" + token + "\n```\n";
+  auto lines = TrimmedLines(RenderLines(md, {}, 20, 60));
+  for (const auto& l : lines) {
+    EXPECT_LE(CellWidth(l), 20u) << "row exceeds viewport width";
+  }
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_TRUE(joined.find(std::string(18, 'x')) != std::string::npos)
+      << "visible head of the token must render";
+  for (const auto& l : lines) {
+    EXPECT_EQ(l.find(token), std::string::npos)
+        << "full token must not fit on one row";
+  }
+}

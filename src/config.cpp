@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <yaml-cpp/yaml.h>
 
@@ -65,7 +66,7 @@ std::string Lowercase(std::string s) {
   return s;
 }
 
-bool LookupColor(const std::string& key, const YAML::Node& value,
+void LookupColor(const std::string& key, const YAML::Node& value,
                  ftxui::Color& out, const std::string& prefix) {
   const std::string path = prefix + "." + key;
   if (!value.IsScalar()) {
@@ -79,22 +80,20 @@ bool LookupColor(const std::string& key, const YAML::Node& value,
                              "' (expected a named color or #rrggbb/#rgb)");
   }
   out = *parsed;
-  return true;
 }
 
 // Validate `theme` mapping against the embedded schema, filling `theme` with
 // the colors found (unset fields keep their defaults). Any unknown key, wrong
 // type, or unparseable color throws std::runtime_error with a dotted path.
 void ValidateTheme(const YAML::Node& theme, Theme& out) {
-  static const std::unordered_map<std::string, bool> kKnownTopLevel = {
-      {"heading", true}, {"link", true},   {"inline_code", true},
-      {"code_block", true}, {"quote_marker", true},
+  static const std::unordered_set<std::string> kKnownTopLevel = {
+      "heading", "link", "inline_code", "code_block", "quote_marker",
   };
-  static const std::unordered_map<std::string, bool> kKnownHeading = {
-      {"h1", true}, {"h2", true}, {"h3", true}, {"h4", true},
+  static const std::unordered_set<std::string> kKnownHeading = {
+      "h1", "h2", "h3", "h4",
   };
-  static const std::unordered_map<std::string, bool> kKnownPair = {
-      {"fg", true}, {"bg", true},
+  static const std::unordered_set<std::string> kKnownPair = {
+      "fg", "bg",
   };
 
   if (!theme.IsMap()) {
@@ -103,6 +102,9 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
   }
 
   for (auto it = theme.begin(); it != theme.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      throw std::runtime_error("config: theme: expected string keys");
+    }
     const std::string key = it->first.Scalar();
     const YAML::Node value = it->second;
 
@@ -112,6 +114,10 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
             "config: theme.heading: expected a mapping {h1..h4}");
       }
       for (auto h = value.begin(); h != value.end(); ++h) {
+        if (!h->first.IsScalar()) {
+          throw std::runtime_error(
+              "config: theme.heading: expected string keys");
+        }
         const std::string hk = h->first.Scalar();
         if (kKnownHeading.count(hk) == 0) {
           throw std::runtime_error("config: theme.heading." + hk +
@@ -133,6 +139,10 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
                                  ": expected a mapping {fg, bg}");
       }
       for (auto p = value.begin(); p != value.end(); ++p) {
+        if (!p->first.IsScalar()) {
+          throw std::runtime_error("config: theme." + key +
+                                   ": expected string keys");
+        }
         const std::string pk = p->first.Scalar();
         if (kKnownPair.count(pk) == 0) {
           throw std::runtime_error("config: theme." + key + "." + pk +
@@ -167,8 +177,8 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
 // unknown key or unparseable value throws std::runtime_error with a dotted
 // path, matching the theme validation style.
 void ValidateDisplay(const YAML::Node& display, Config& cfg) {
-  static const std::unordered_map<std::string, bool> kKnown = {
-      {"horizontal", true},
+  static const std::unordered_set<std::string> kKnown = {
+      "horizontal",
   };
 
   if (!display.IsMap()) {
@@ -177,6 +187,9 @@ void ValidateDisplay(const YAML::Node& display, Config& cfg) {
   }
 
   for (auto it = display.begin(); it != display.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      throw std::runtime_error("config: display: expected string keys");
+    }
     const std::string key = it->first.Scalar();
     const YAML::Node value = it->second;
 
@@ -253,8 +266,19 @@ Config LoadConfig(const std::string& path) {
 
   YAML::Node root = YAML::LoadFile(path);
 
+  if (!root.IsDefined() || root.IsNull()) {
+    return cfg;  // empty config file: silently use defaults.
+  }
+  if (!root.IsMap()) {
+    throw std::runtime_error(
+        "config: expected a mapping at the top level");
+  }
+
   // Validate top-level keys (strict, matching the theme-style schema).
   for (auto it = root.begin(); it != root.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      throw std::runtime_error("config: expected string keys at top level");
+    }
     const std::string key = it->first.Scalar();
     if (key != "theme" && key != "display") {
       throw std::runtime_error("config: " + key + ": unknown top-level key");

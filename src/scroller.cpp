@@ -21,11 +21,14 @@ namespace ftxui {
 namespace {
 
 // Renders a width-constrained element into a tall screen and returns the last
-// row index with visible content (querying the full width, so trailing padding
-// and vscroll glyphs don't count). Used in wrap mode where the wrapped height
-// is only known after a constrained layout.
-int MeasureWrapHeight(const Element& element, int viewport_width) {
-  int cap = 256;
+// row index with visible content (querying the full width, so trailing
+// padding doesn't count). Used in wrap mode where the wrapped height is only
+// known after a constrained layout. `seed_cap` is a lower bound for the
+// height (the unwrapped requirement): starting there avoids re-rendering
+// through several growth steps for long documents.
+int MeasureWrapHeight(const Element& element, int viewport_width,
+                      int seed_cap) {
+  int cap = std::clamp(seed_cap, 256, 65536);
   for (;;) {
     Screen screen = Screen::Create(Dimension::Fixed(viewport_width),
                                    Dimension::Fixed(cap));
@@ -34,7 +37,7 @@ int MeasureWrapHeight(const Element& element, int viewport_width) {
     for (int row = 0; row < cap; ++row) {
       for (int col = 0; col < viewport_width; ++col) {
         const Cell& cell = screen.CellAt(col, row);
-        if (cell.character != " " && cell.character != "" ||
+        if ((cell.character != " " && cell.character != "") ||
             cell.background_color != Color::Default) {
           last = row;
           break;
@@ -68,8 +71,6 @@ class ScrollerBase : public ComponentBase {
     background->ComputeRequirement();
     int natural_height = std::max(1, background->requirement().min_y);
     int natural_width = std::max(1, background->requirement().min_x);
-    content_height_ = natural_height;
-    content_width_ = natural_width;
     int viewport_height = std::max(1, *viewport_height_);
     *viewport_height_ = viewport_height;
     int viewport_width = std::max(1, *viewport_width_);
@@ -83,8 +84,12 @@ class ScrollerBase : public ComponentBase {
     float y = static_cast<float>(*selected_) + viewport_height / 2.f - 1.f;
 
     // Scroll mode: content keeps its natural (full) width so it can be
-    // panned.
+    // panned. The wrap measurement below is mode-specific (the content tree
+    // differs per mode), so invalidate it when leaving wrap mode.
     if (*horizontal_scroll_) {
+      wrap_measured_ = false;
+      content_height_ = natural_height;
+      content_width_ = natural_width;
       y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
       float x = 0.f;
       if (content_width_ > viewport_width) {
@@ -99,11 +104,19 @@ class ScrollerBase : public ComponentBase {
     // width and then clip it, which defeats reflow; without it the content
     // fills the viewport width and hflow wraps there. Measure the wrapped
     // height once per viewport width for the vertical scroll math.
-    if (measured_wrap_width_ != viewport_width) {
+    if (!wrap_measured_ || measured_wrap_width_ != viewport_width) {
       measured_wrap_width_ = viewport_width;
-      content_height_ = std::max(1, MeasureWrapHeight(background, viewport_width));
-      content_width_ = viewport_width;
+      wrap_measured_ = true;
+      // Wrapped rows >= unwrapped rows, so the natural height is a safe
+      // lower bound for the measurement cap.
+      measured_wrap_height_ = std::max(
+          1, MeasureWrapHeight(background, viewport_width, natural_height));
     }
+    // Every render passes through here (not only measuring ones): restore
+    // the cached height, otherwise the natural height assigned above would
+    // silently shrink the scroll range back to the unwrapped size.
+    content_height_ = measured_wrap_height_;
+    content_width_ = viewport_width;
     y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
     return std::move(background) | focusPositionRelative(0.f, y) | yframe |
            yflex;
@@ -177,9 +190,11 @@ class ScrollerBase : public ComponentBase {
   Ref<int> selected_x_;
   Ref<int> viewport_width_;
   Ref<bool> horizontal_scroll_;
-  int content_height_ = -1;
-  int content_width_ = -1;
-  int measured_wrap_width_ = -1;
+   int content_height_ = -1;
+   int content_width_ = -1;
+   int measured_wrap_width_ = -1;
+   int measured_wrap_height_ = 1;
+   bool wrap_measured_ = false;
 };
 
 }  // namespace

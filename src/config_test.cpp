@@ -257,4 +257,32 @@ TEST(Config, DumpDefaultConfig_RoundTripMatchesDefaults) {
   std::remove(path.c_str());
 }
 
+// An empty config file yields defaults instead of a yaml-cpp exception.
+TEST(Config, LoadConfig_EmptyFileReturnsDefaults) {
+  const std::string path = TempYaml("");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.theme.heading_h1, ftxui::Color::Red);
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);
+  std::remove(path.c_str());
+}
+
+// A defined-but-not-a-mapping root is a typed error, not an untyped
+// yaml-cpp exception.
+TEST(Config, LoadConfig_NonMapRootThrows) {
+  const std::string path = TempYaml("- just\n- a\n- list\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+// Non-scalar mapping keys are rejected with a typed error at every level.
+TEST(Config, LoadConfig_NonScalarKeyThrows) {
+  const std::string top = TempYaml("? [a, b]\n: 1\n");
+  EXPECT_THROW(markit::LoadConfig(top), std::runtime_error);
+  std::remove(top.c_str());
+
+  const std::string nested = TempYaml("theme:\n  ? [a]\n  : red\n");
+  EXPECT_THROW(markit::LoadConfig(nested), std::runtime_error);
+  std::remove(nested.c_str());
+}
+
 }  // namespace

@@ -44,7 +44,7 @@ class Renderer {
     parser.flags =
         MD_DIALECT_GITHUB | MD_FLAG_PERMISSIVEAUTOLINKS;
 
-    frames_.push_back(Frame{Kind::Doc, 0, 0, false});
+    frames_.push_back(Frame::Doc());
     parser.enter_block = &Renderer::cb_enter_block;
     parser.leave_block = &Renderer::cb_leave_block;
     parser.enter_span = &Renderer::cb_enter_span;
@@ -100,6 +100,31 @@ class Renderer {
     std::string text;              // verbatim buffer (code/html)
     std::vector<std::pair<bool, std::vector<Element>>> table_rows;
     std::vector<Element> cells;    // current row cells
+
+    // Named factories: positional `Frame{Kind::X, ...}` literals depend on
+    // field order (the trailing bool is `is_header_row`), so construct
+    // frames through these instead.
+    static Frame Doc() { return Frame{Kind::Doc, 0, 0, false}; }
+    static Frame Para() { return Frame{Kind::Para, 0, 0, false}; }
+    static Frame Heading(unsigned level) {
+      return Frame{Kind::Heading, level, 0, false};
+    }
+    static Frame Quote() { return Frame{Kind::Quote, 0, 0, false}; }
+    static Frame List() { return Frame{Kind::List, 0, 0, false}; }
+    static Frame Item() { return Frame{Kind::Item, 0, 0, false}; }
+    static Frame Code() { return Frame{Kind::Code, 0, 0, false}; }
+    static Frame Html() { return Frame{Kind::Html, 0, 0, false}; }
+    static Frame Table(unsigned cols) {
+      return Frame{Kind::Table, 0, cols, false};
+    }
+    static Frame Row(bool is_header) {
+      return Frame{Kind::Row, 0, 0, is_header};
+    }
+    static Frame Cell(char align, bool is_header) {
+      Frame f{Kind::Cell, 0, 0, is_header};
+      f.cell_align = align;
+      return f;
+    }
   };
 
   // ---- stack helpers ------------------------------------------------------
@@ -148,10 +173,13 @@ class Renderer {
   // Split a row's fragments into word elements for wrap mode. A "word" is a
   // maximal run of non-space text; it may span several styled fragments (e.g.
   // `[a](url)b`), whose pieces are glued into one element so the wrap layout
-  // never breaks inside a word. Inter-word spaces are attached as a prefix to
-  // the following word, so the wrapping point lands exactly at the source's
-  // whitespace.
-  Element WrapRow(std::vector<Fragment>& fragments) {
+  // never breaks inside a word. Inter-word whitespace becomes a plain
+  // (unstyled) piece glued ahead of the following word, so the wrapping point
+  // lands exactly at the source's whitespace while a link/emphasis/code style
+  // no longer decorates the space itself. Overlong tokens (longer than the
+  // viewport) are never split mid-word; they clip. Trailing whitespace is
+  // kept as a final plain piece so an all-space row keeps its height.
+  Element WrapRow(const std::vector<Fragment>& fragments) {
     using Piece = std::pair<std::string, Decorator>;  // text, style
     Elements words;
     std::vector<Piece> cur;
@@ -161,23 +189,17 @@ class Renderer {
       if (cur.empty()) {
         return;
       }
-      if (cur.size() == 1) {
-        Element e = ftxui::text(std::move(cur[0].first));
-        if (cur[0].second) {
-          e = cur[0].second(std::move(e));
+      Elements pieces;
+      pieces.reserve(cur.size());
+      for (auto& piece : cur) {
+        Element e = ftxui::text(std::move(piece.first));
+        if (piece.second) {
+          e = piece.second(std::move(e));
         }
-        words.push_back(std::move(e));
-      } else {
-        Elements pieces;
-        for (auto& piece : cur) {
-          Element e = ftxui::text(std::move(piece.first));
-          if (piece.second) {
-            e = piece.second(std::move(e));
-          }
-          pieces.push_back(std::move(e));
-        }
-        words.push_back(ftxui::hbox(std::move(pieces)));
+        pieces.push_back(std::move(e));
       }
+      words.push_back(pieces.size() == 1 ? std::move(pieces[0])
+                                         : ftxui::hbox(std::move(pieces)));
       cur.clear();
     };
 
@@ -219,6 +241,9 @@ class Renderer {
       }
     }
     finish();
+    if (!pending.empty()) {
+      words.push_back(ftxui::text(std::move(pending)));
+    }
     return ftxui::hflow(std::move(words));
   }
 
@@ -229,11 +254,12 @@ class Renderer {
       return ftxui::text("");
     }
 
-    // Always box the fragments: without it, a lone styled span (e.g. an inline
-    // code row) becomes a direct vbox child and its background decorator
-    // paints the full row width instead of just the text. Wrap mode instead
-    // word-splits the fragments so the row reflows to the available width
-    // (table cells stay single-line regardless).
+    // Rows built from fragments: a lone styled span (e.g. an inline code row)
+    // must stay wrapped in its own element, otherwise becoming a direct vbox
+    // child lets its background decorator paint the full row width instead of
+    // just the text. Wrap mode instead word-splits the fragments so the row
+    // reflows to the available width (table cells stay single-line
+    // regardless).
     if (wrap_ && frame.kind != Kind::Cell) {
       return WrapRow(fragments);
     }
@@ -294,29 +320,29 @@ class Renderer {
   int EnterBlockImpl(MD_BLOCKTYPE type, void* detail) {
     switch (type) {
       case MD_BLOCK_P:
-        Push(Frame{Kind::Para, 0, 0, false});
+        Push(Frame::Para());
         break;
       case MD_BLOCK_H: {
         auto* h = static_cast<MD_BLOCK_H_DETAIL*>(detail);
-        Push(Frame{Kind::Heading, h->level, 0, false});
+        Push(Frame::Heading(h->level));
         break;
       }
       case MD_BLOCK_HR:
         Attach(ftxui::separator(), true);
         break;
       case MD_BLOCK_QUOTE:
-        Push(Frame{Kind::Quote, 0, 0, false});
+        Push(Frame::Quote());
         break;
       case MD_BLOCK_UL: {
         auto* ul = static_cast<MD_BLOCK_UL_DETAIL*>(detail);
-        Frame f{Kind::List, 0, 0, false};
+        Frame f = Frame::List();
         f.bullet = ul->mark;
         Push(std::move(f));
         break;
       }
       case MD_BLOCK_OL: {
         auto* ol = static_cast<MD_BLOCK_OL_DETAIL*>(detail);
-        Frame f{Kind::List, 0, 0, false};
+        Frame f = Frame::List();
         f.ordered_index = ol->start;
         f.ordered_mark = ol->mark_delimiter;
         Push(std::move(f));
@@ -325,7 +351,7 @@ class Renderer {
       case MD_BLOCK_LI: {
         auto* li = static_cast<MD_BLOCK_LI_DETAIL*>(detail);
         Frame& list = Top();  // enclosing list
-        Frame f{Kind::Item, 0, 0, false};
+        Frame f = Frame::Item();
         f.is_task = li->is_task != 0;
         f.task_mark = li->task_mark;
         f.bullet = list.bullet;
@@ -338,14 +364,14 @@ class Renderer {
         break;
       }
       case MD_BLOCK_CODE:
-        Push(Frame{Kind::Code, 0, 0, false});
+        Push(Frame::Code());
         break;
       case MD_BLOCK_HTML:
-        Push(Frame{Kind::Html, 0, 0, false});
+        Push(Frame::Html());
         break;
       case MD_BLOCK_TABLE: {
         auto* t = static_cast<MD_BLOCK_TABLE_DETAIL*>(detail);
-        Push(Frame{Kind::Table, 0, t->col_count, false});
+        Push(Frame::Table(t->col_count));
         break;
       }
       case MD_BLOCK_THEAD:
@@ -367,15 +393,14 @@ class Renderer {
       case MD_BLOCK_TR: {
         Frame& table = Top();
         bool is_header = table.kind == Kind::Table && table.in_thead;
-        Push(Frame{Kind::Row, 0, 0, is_header});
+        Push(Frame::Row(is_header));
         break;
       }
       case MD_BLOCK_TH:
       case MD_BLOCK_TD: {
         auto* td = static_cast<MD_BLOCK_TD_DETAIL*>(detail);
-        Frame f{Kind::Cell, 0, 0, type == MD_BLOCK_TH};
-        f.cell_align = static_cast<char>(td->align);
-        Push(std::move(f));
+        Push(Frame::Cell(static_cast<char>(td->align),
+                         type == MD_BLOCK_TH));
         break;
       }
       case MD_BLOCK_DOC:
@@ -584,9 +609,17 @@ class Renderer {
         break;
       }
       case MD_TEXT_HTML:
-        // Raw HTML block/span markup: keep it verbatim inside the current
-        // Html frame (like code) so nothing is lost or misinterpreted.
-        Top().text += s;
+        // Raw HTML block markup is buffered verbatim inside the current
+        // Code/Html frame (like fenced code). Inline HTML inside running
+        // text has no verbatim frame, so emit it verbatim with inline-code
+        // styling instead of dropping it.
+        if (Top().kind == Kind::Code || Top().kind == Kind::Html) {
+          Top().text += s;
+        } else {
+          span_decorators_.push_back(InlineCodeStyle());
+          EmitInline(s);
+          span_decorators_.pop_back();
+        }
         break;
       default:
         break;
@@ -622,10 +655,11 @@ class Renderer {
         rows.push_back(token_text(l));
         continue;
       }
-      // Wrap mode: split the raw line into word elements (same prefix-glue as
-      // WrapRow: inter-word whitespace rides along with the following token,
-      // leading indentation stays with the first token), then hflow reflows
-      // the row at the available width.
+      // Wrap mode: split the raw line into word elements (same plain-prefix
+      // glue as WrapRow: inter-word whitespace rides along with the following
+      // token, leading indentation stays with the first token), then hflow
+      // reflows the row at the available width. Tokens longer than the
+      // viewport are never split mid-word; they clip.
       Elements toks;
       std::string pending;
       size_t i = 0;
@@ -680,6 +714,9 @@ class Renderer {
       unsigned i = 0;
       for (const auto& cell : cells) {
         if (i < columns) {
+          // requirement() is only valid after layout; compute it so column
+          // widths reflect content instead of a stale/default requirement.
+          cell->ComputeRequirement();
           auto req = cell->requirement();
           widths[i] = std::max(widths[i], static_cast<unsigned>(
                                                std::max<int>(req.min_x, 1)));

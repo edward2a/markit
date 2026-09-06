@@ -119,14 +119,18 @@ int main(int argc, char** argv) {
   // `hscroll` tells the scroller to enable horizontal panning (scroll mode).
   markit::Config content_cfg = config;
   bool hscroll = (config.horizontal_wrap == markit::WrapMode::Scroll);
+  const bool is_empty_placeholder = (contents == "(empty file)");
 
-  auto content = Renderer(
-      [&] { return markit::RenderMarkdown(contents, content_cfg); });
+  auto content = Renderer([&] {
+    Element e = markit::RenderMarkdown(contents, content_cfg);
+    return is_empty_placeholder ? e | dim : std::move(e);
+  });
 
   int selected = 0;
   int selected_x = 0;
-  int viewport_height = Terminal::Size().dimy;
-  int viewport_width = Terminal::Size().dimx;
+  const auto term_size = Terminal::Size();
+  int viewport_height = term_size.dimy;
+  int viewport_width = term_size.dimx;
   auto scroller =
       Scroller(std::move(content), &selected, &viewport_height,
                [&](int before, int after) { log("scroll", before, after); },
@@ -149,6 +153,7 @@ int main(int argc, char** argv) {
       content_cfg.horizontal_wrap =
           hscroll ? markit::WrapMode::Scroll : markit::WrapMode::Wrap;
       selected_x = 0;  // re-anchor horizontally on mode switch.
+      selected = 0;    // content height changes with the mode; restart at top.
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
