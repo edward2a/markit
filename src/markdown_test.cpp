@@ -84,20 +84,66 @@ TEST(Markdown, Code) {
   EXPECT_TRUE(AnyLineContains(rows, "int x = 1;"));
 }
 
-// Unordered and ordered lists render markers plus item text.
+// Unordered and ordered lists render their sources markers (bullet char /
+// number), not the numerically mislabeled markers from the old aggregate-init
+// bug that made `* alpha` render as `0. alpha`.
 TEST(Markdown, Lists) {
   auto rows = RenderLines("* alpha\n* beta\n\n1. one\n2. two\n");
-  EXPECT_TRUE(AnyLineContains(rows, "alpha"));
-  EXPECT_TRUE(AnyLineContains(rows, "beta"));
-  EXPECT_TRUE(AnyLineContains(rows, "one"));
-  EXPECT_TRUE(AnyLineContains(rows, "two"));
+  EXPECT_TRUE(AnyLineContains(rows, "* alpha"));
+  EXPECT_TRUE(AnyLineContains(rows, "* beta"));
+  EXPECT_TRUE(AnyLineContains(rows, "1. one"));
+  EXPECT_TRUE(AnyLineContains(rows, "2. two"));
+  EXPECT_FALSE(AnyLineContains(rows, "0. alpha"));
+  EXPECT_FALSE(AnyLineContains(rows, "0. beta"));
+}
+
+// Dash-marker lists (the CHANGELOG.md style) keep their bullet character.
+TEST(Markdown, DashBulletList) {
+  auto rows = RenderLines("- add - First change\n- mod - Second change\n");
+  EXPECT_TRUE(AnyLineContains(rows, "- add - First change"));
+  EXPECT_TRUE(AnyLineContains(rows, "- mod - Second change"));
+}
+
+// Ordered lists honor the starting index from the source.
+TEST(Markdown, OrderedListStartIndex) {
+  auto rows = RenderLines("5. five\n6. six\n");
+  EXPECT_TRUE(AnyLineContains(rows, "5. five"));
+  EXPECT_TRUE(AnyLineContains(rows, "6. six"));
 }
 
 // Task list items are recognized.
 TEST(Markdown, TaskList) {
   auto rows = RenderLines("- [ ] pending\n- [x] done\n");
-  EXPECT_TRUE(AnyLineContains(rows, "pending"));
-  EXPECT_TRUE(AnyLineContains(rows, "done"));
+  EXPECT_TRUE(AnyLineContains(rows, "[ ] pending"));
+  EXPECT_TRUE(AnyLineContains(rows, "[x] done"));
+}
+
+// Trailing-space hard breaks split a paragraph into one row per source line.
+// Regression: the old "\n" text node inflated the paragraph to two rows, so
+// inline-code background colors bled into the line below and the lines were
+// concatenated horizontally instead of stacked.
+TEST(Markdown, HardBreakLines) {
+  auto rows = RenderLines("line one  \nline two with `code`  \nline three\n");
+  for (auto& line : rows) {
+    while (!line.empty() && line.back() == ' ') {
+      line.pop_back();
+    }
+  }
+  ASSERT_GE(rows.size(), 3u);
+  EXPECT_EQ(rows[0], "line one");
+  EXPECT_EQ(rows[1], "line two with code");
+  EXPECT_EQ(rows[2], "line three");
+}
+
+// A lone inline code span must not paint a full-width background: without an
+// hbox wrapper its bgcolor decorator fills the whole row. Check raw cell
+// backgrounds just past the code text (they must stay at the default color).
+TEST(Markdown, InlineCodeBackgroundStaysInline) {
+  ftxui::Screen screen(40, 10);
+  ftxui::Render(screen, markit::RenderMarkdown("`code`\n"));
+  const auto baseline = screen.CellAt(0, 2).background_color;  // empty row
+  EXPECT_NE(screen.CellAt(1, 0).background_color, baseline);    // under `code`
+  EXPECT_EQ(screen.CellAt(6, 0).background_color, baseline);    // past `code`
 }
 
 // Links render with their label; the href is embedded via the hyperlink

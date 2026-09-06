@@ -94,6 +94,7 @@ class Renderer {
     char cell_align = 0;          // MD_ALIGN value for a table cell
     std::vector<Element> children;
     std::vector<Fragment> inline_;
+    std::vector<Element> rows_;      // completed hard-break rows
     std::string text;              // verbatim buffer (code/html)
     std::vector<std::pair<bool, std::vector<Element>>> table_rows;
     std::vector<Element> cells;    // current row cells
@@ -143,17 +144,45 @@ class Renderer {
   }
 
   Element FlattenInline(Frame& frame) {
-    Element prev = nullptr;
+    Elements items;
     for (auto& frag : frame.inline_) {
       Element e = ftxui::text(std::move(frag.text));
       if (frag.style) {
         e = frag.style(std::move(e));
       }
-      prev = (prev == nullptr) ? std::move(e)
-                               : ftxui::hbox({std::move(prev), std::move(e)});
+      items.push_back(std::move(e));
     }
     frame.inline_.clear();
-    return (prev == nullptr) ? ftxui::text("") : std::move(prev);
+    if (items.empty()) {
+      return ftxui::text("");
+    }
+    // Always box the fragments: without it, a lone styled span (e.g. an inline
+    // code row) becomes a direct vbox child and its background decorator
+    // paints the full row width instead of just the text.
+    return ftxui::hbox(std::move(items));
+  }
+
+  // End the current inline row (a hard break) and start a new one.
+  void FlushRow(Frame& frame) {
+    if (frame.inline_.empty()) {
+      return;
+    }
+    frame.rows_.push_back(FlattenInline(frame));
+  }
+
+  // Combine completed hard-break rows with any trailing inline fragments into
+  // a single block element (vbox of rows, or a lone row when there is one).
+  Element InlineBlocks(Frame& frame) {
+    if (!frame.inline_.empty()) {
+      frame.rows_.push_back(FlattenInline(frame));
+    }
+    if (frame.rows_.empty()) {
+      return ftxui::text("");
+    }
+    if (frame.rows_.size() == 1) {
+      return std::move(frame.rows_[0]);
+    }
+    return ftxui::vbox(std::move(frame.rows_));
   }
 
   // ---- md4c callback dispatchers -----------------------------------------
@@ -193,13 +222,17 @@ class Renderer {
         break;
       case MD_BLOCK_UL: {
         auto* ul = static_cast<MD_BLOCK_UL_DETAIL*>(detail);
-        Push(Frame{Kind::List, 0, 0, false, 0, 0, ul->mark});
+        Frame f{Kind::List, 0, 0, false};
+        f.bullet = ul->mark;
+        Push(std::move(f));
         break;
       }
       case MD_BLOCK_OL: {
         auto* ol = static_cast<MD_BLOCK_OL_DETAIL*>(detail);
-        Push(Frame{Kind::List, 0, 0, false, 0, 0, 0, ol->start,
-                   ol->mark_delimiter});
+        Frame f{Kind::List, 0, 0, false};
+        f.ordered_index = ol->start;
+        f.ordered_mark = ol->mark_delimiter;
+        Push(std::move(f));
         break;
       }
       case MD_BLOCK_LI: {
@@ -268,12 +301,12 @@ class Renderer {
     switch (type) {
       case MD_BLOCK_P: {
         Frame top = Pop();
-        Attach(FlattenInline(top), false);
+        Attach(InlineBlocks(top), false);
         break;
       }
       case MD_BLOCK_H: {
         Frame top = Pop();
-        Element e = FlattenInline(top);
+        Element e = InlineBlocks(top);
         e = ftxui::bold(e) | ftxui::color(HeadingColor(top.heading_level));
         Attach(std::move(e), true);
         break;
@@ -300,8 +333,8 @@ class Renderer {
         Frame top = Pop();
         // In a tight list md4c sends the item text directly into this frame
         // (no wrapping paragraph), so flush any pending inline fragments.
-        if (!top.inline_.empty()) {
-          top.children.insert(top.children.begin(), FlattenInline(top));
+        if (!top.inline_.empty() || !top.rows_.empty()) {
+          top.children.insert(top.children.begin(), InlineBlocks(top));
         }
         std::string bullet;
         if (top.is_task) {
@@ -358,12 +391,12 @@ class Renderer {
         if (row.kind != Kind::Row) {
           return 1;  // stack desync; abort.
         }
-        // Combine direct inline text with any nested block content.
+        // Combine direct inline text (possibly spanning hard-break rows) with
+        // any nested block content.
         Elements parts;
-        bool has_inline = !top.inline_.empty();
-        Element inline_el = FlattenInline(top);
+        bool has_inline = !top.inline_.empty() || !top.rows_.empty();
         if (has_inline) {
-          parts.push_back(std::move(inline_el));
+          parts.push_back(InlineBlocks(top));
         }
         for (auto& c : top.children) {
           parts.push_back(std::move(c));
@@ -449,7 +482,10 @@ class Renderer {
         EmitInline(" ");
         break;
       case MD_TEXT_BR:
-        EmitInline("\n");
+        // A trailing-streak hard break ends the current inline row instead of
+        // embedding a "\n" text node (which would inflate the row height and
+        // make background decorators bleed onto the line below).
+        FlushRow(Top());
         break;
       case MD_TEXT_CODE: {
         Frame& top = Top();
