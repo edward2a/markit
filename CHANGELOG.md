@@ -4,7 +4,7 @@
 
 Changes are recorded with the following format:  
 Version tag (add only when current branch is version sync with master):  
-`### <semver version, 0.0.1 if first)> - <date/timestamp>`  
+`## <semver version, 0.0.1 if first)> - <date/timestamp>`  
 Change tag:  
 `- <date/timestamp> - <op:add|mod|rem> - <change text>`  
 
