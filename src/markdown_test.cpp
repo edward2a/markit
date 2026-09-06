@@ -84,20 +84,38 @@ TEST(Markdown, Code) {
   EXPECT_TRUE(AnyLineContains(rows, "int x = 1;"));
 }
 
-// Unordered and ordered lists render markers plus item text.
+// Unordered and ordered lists render their sources markers (bullet char /
+// number), not the numerically mislabeled markers from the old aggregate-init
+// bug that made `* alpha` render as `0. alpha`.
 TEST(Markdown, Lists) {
   auto rows = RenderLines("* alpha\n* beta\n\n1. one\n2. two\n");
-  EXPECT_TRUE(AnyLineContains(rows, "alpha"));
-  EXPECT_TRUE(AnyLineContains(rows, "beta"));
-  EXPECT_TRUE(AnyLineContains(rows, "one"));
-  EXPECT_TRUE(AnyLineContains(rows, "two"));
+  EXPECT_TRUE(AnyLineContains(rows, "* alpha"));
+  EXPECT_TRUE(AnyLineContains(rows, "* beta"));
+  EXPECT_TRUE(AnyLineContains(rows, "1. one"));
+  EXPECT_TRUE(AnyLineContains(rows, "2. two"));
+  EXPECT_FALSE(AnyLineContains(rows, "0. alpha"));
+  EXPECT_FALSE(AnyLineContains(rows, "0. beta"));
+}
+
+// Dash-marker lists (the CHANGELOG.md style) keep their bullet character.
+TEST(Markdown, DashBulletList) {
+  auto rows = RenderLines("- add - First change\n- mod - Second change\n");
+  EXPECT_TRUE(AnyLineContains(rows, "- add - First change"));
+  EXPECT_TRUE(AnyLineContains(rows, "- mod - Second change"));
+}
+
+// Ordered lists honor the starting index from the source.
+TEST(Markdown, OrderedListStartIndex) {
+  auto rows = RenderLines("5. five\n6. six\n");
+  EXPECT_TRUE(AnyLineContains(rows, "5. five"));
+  EXPECT_TRUE(AnyLineContains(rows, "6. six"));
 }
 
 // Task list items are recognized.
 TEST(Markdown, TaskList) {
   auto rows = RenderLines("- [ ] pending\n- [x] done\n");
-  EXPECT_TRUE(AnyLineContains(rows, "pending"));
-  EXPECT_TRUE(AnyLineContains(rows, "done"));
+  EXPECT_TRUE(AnyLineContains(rows, "[ ] pending"));
+  EXPECT_TRUE(AnyLineContains(rows, "[x] done"));
 }
 
 // Links render with their label; the href is embedded via the hyperlink

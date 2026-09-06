@@ -193,13 +193,17 @@ class Renderer {
         break;
       case MD_BLOCK_UL: {
         auto* ul = static_cast<MD_BLOCK_UL_DETAIL*>(detail);
-        Push(Frame{Kind::List, 0, 0, false, 0, 0, ul->mark});
+        Frame f{Kind::List, 0, 0, false};
+        f.bullet = ul->mark;
+        Push(std::move(f));
         break;
       }
       case MD_BLOCK_OL: {
         auto* ol = static_cast<MD_BLOCK_OL_DETAIL*>(detail);
-        Push(Frame{Kind::List, 0, 0, false, 0, 0, 0, ol->start,
-                   ol->mark_delimiter});
+        Frame f{Kind::List, 0, 0, false};
+        f.ordered_index = ol->start;
+        f.ordered_mark = ol->mark_delimiter;
+        Push(std::move(f));
         break;
       }
       case MD_BLOCK_LI: {

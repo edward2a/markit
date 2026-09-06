@@ -36,3 +36,4 @@ Change tag:
 - 2026-09-04T05:58:08Z - mod - Add yaml-cpp via FetchContent (0.8.0) with CMAKE\_POLICY\_VERSION\_MINIMUM for CMake 4
 - 2026-09-04T11:30:12Z - add - Milestone 3.1: --dump-config flag writes default theme YAML (with color-format comments) to stdout
 - 2026-09-04T14:12:00Z - add - Milestone 3.2: -h/--help flag prints usage (stdout, exit 0); usage helper shared with error path (stderr, exit 1)
+- 2026-09-06T16:56:04Z - mod - Fix list markers: unordered/ordered marker fields were misaligned in Frame aggregate initialization (bullets showed as numbers); set fields explicitly and add marker assertions to list tests
