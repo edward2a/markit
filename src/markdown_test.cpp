@@ -118,6 +118,34 @@ TEST(Markdown, TaskList) {
   EXPECT_TRUE(AnyLineContains(rows, "[x] done"));
 }
 
+// Trailing-space hard breaks split a paragraph into one row per source line.
+// Regression: the old "\n" text node inflated the paragraph to two rows, so
+// inline-code background colors bled into the line below and the lines were
+// concatenated horizontally instead of stacked.
+TEST(Markdown, HardBreakLines) {
+  auto rows = RenderLines("line one  \nline two with `code`  \nline three\n");
+  for (auto& line : rows) {
+    while (!line.empty() && line.back() == ' ') {
+      line.pop_back();
+    }
+  }
+  ASSERT_GE(rows.size(), 3u);
+  EXPECT_EQ(rows[0], "line one");
+  EXPECT_EQ(rows[1], "line two with code");
+  EXPECT_EQ(rows[2], "line three");
+}
+
+// A lone inline code span must not paint a full-width background: without an
+// hbox wrapper its bgcolor decorator fills the whole row. Check raw cell
+// backgrounds just past the code text (they must stay at the default color).
+TEST(Markdown, InlineCodeBackgroundStaysInline) {
+  ftxui::Screen screen(40, 10);
+  ftxui::Render(screen, markit::RenderMarkdown("`code`\n"));
+  const auto baseline = screen.CellAt(0, 2).background_color;  // empty row
+  EXPECT_NE(screen.CellAt(1, 0).background_color, baseline);    // under `code`
+  EXPECT_EQ(screen.CellAt(6, 0).background_color, baseline);    // past `code`
+}
+
 // Links render with their label; the href is embedded via the hyperlink
 // decorator (not visible as plain text), but the label must appear.
 TEST(Markdown, Link) {

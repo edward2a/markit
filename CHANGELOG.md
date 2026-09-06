@@ -37,3 +37,5 @@ Change tag:
 - 2026-09-04T11:30:12Z - add - Milestone 3.1: --dump-config flag writes default theme YAML (with color-format comments) to stdout
 - 2026-09-04T14:12:00Z - add - Milestone 3.2: -h/--help flag prints usage (stdout, exit 0); usage helper shared with error path (stderr, exit 1)
 - 2026-09-06T16:56:04Z - mod - Fix list markers: unordered/ordered marker fields were misaligned in Frame aggregate initialization (bullets showed as numbers); set fields explicitly and add marker assertions to list tests
+- 2026-09-06T17:41:24Z - mod - Fix hard-break rendering: trailing-space hard breaks now split paragraphs into one row per source line instead of a "\n" text node that inflated the row height and made inline-code background colors bleed into the line below
+- 2026-09-06T17:53:41Z - mod - Fix inline-code background extending full screen width: FlattenInline now always returns an hbox (even for a single fragment), so a lone styled span is width-constrained instead of painting a bare vbox child full-row background
