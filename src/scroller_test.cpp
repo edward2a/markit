@@ -375,6 +375,41 @@ TEST(Scroller, WrapSurvivesModeToggleAtSameWidth) {
   EXPECT_EQ(selected, 0);
 }
 
+// In scroll mode the code box spans the full content width instead of
+// hugging its own widest line: with a 100-column paragraph above a narrow
+// block at a 60-column viewport, the border runs past the viewport edge
+// (no closing corner visible) and pans with the content.
+TEST(Scroller, ScrollCodeBoxSpansContentWidth) {
+  const std::string md = std::string(100, 'p') + "\n```\nhi\n```\n";
+  int selected = 0;
+  int viewport_height = kHeight;
+  int selected_x = 0;
+  int viewport_width = 60;
+  bool hscroll = true;
+  markit::Config cfg;
+  cfg.horizontal_wrap = markit::WrapMode::Scroll;
+  auto scroller = ftxui::Scroller(
+      ftxui::Renderer(
+          [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+  ftxui::Screen screen(60, kHeight);
+  ftxui::Render(screen, scroller->Render());
+  int border_row = -1;
+  for (int r = 0; r < kHeight; ++r) {
+    if (screen.CellAt(0, r).character == "┌") {
+      border_row = r;
+      break;
+    }
+  }
+  ASSERT_GE(border_row, 0) << "code box border must render";
+  for (int c = 0; c < 60; ++c) {
+    EXPECT_NE(screen.CellAt(c, border_row).character, "┐")
+        << "border must not close inside the viewport";
+  }
+  // Column 59 is the vscroll_indicator track; the border runs right up to it.
+  EXPECT_EQ(screen.CellAt(58, border_row).character, "─");
+}
+
 // The scroller tracks the viewport-width ref across renders: narrowing the
 // viewport reflows wrapped content (the last word leaves the first row) and
 // widening again restores the earlier layout.

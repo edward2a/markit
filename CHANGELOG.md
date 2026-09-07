@@ -55,3 +55,4 @@ Change tag:
 - 2026-09-07T00:04:53Z - mod - Cache the rendered content tree (rebuild only on display-mode switch instead of re-parsing per frame) and skip redundant requirement computation for identical trees; refresh the viewport size every render so terminal resizes reflow immediately
 - 2026-09-07T00:04:53Z - mod - Track viewport-width changes across renders with re-measurement (regression test WrapAdaptsToViewportWidthChange)
 - 2026-09-07T00:15:43Z - mod - Fix wrap mode breaking styled runs at spaces: inter-word whitespace keeps the following word's style when the preceding piece shares the same span-stack identity, so multi-word links/emphasis/code render as one continuous run like scroll mode, while boundary spaces stay plain
+- 2026-09-07T00:29:46Z - mod - Unify code/HTML box width: scroll mode no longer shrink-wraps the border to the widest line; the box spans the full content width like tables and like wrap mode, panning with the document

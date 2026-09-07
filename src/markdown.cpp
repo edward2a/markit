@@ -729,16 +729,11 @@ class Renderer {
     if (rows.empty()) {
       rows.push_back(ftxui::text(""));
     }
-    // Wrap mode: the box spans the full content width and hflow reflows each
-    // line inside it. Scroll mode: the hbox wrapper makes the border hug the
-    // widest line (natural width) instead of stretching to the window, so the
-    // box clips/panes rather than reflowing.
-    auto boxed = ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme_.code_block_bg) |
-                 ftxui::borderLight;
-    if (wrap) {
-      return boxed;
-    }
-    return ftxui::hbox(boxed);
+    // Both modes: the box spans the full content width, like tables. In wrap
+    // mode hflow reflows each line inside it; in scroll mode the box keeps
+    // its natural width and pans with the rest of the content.
+    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme_.code_block_bg) |
+           ftxui::borderLight;
   }
 
   Element TableElement(

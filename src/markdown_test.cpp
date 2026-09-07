@@ -398,6 +398,31 @@ TEST(Markdown, WrapInlineCodeInternalSpaceKeepsBackground) {
       << "space inside inline code must keep the background";
 }
 
+// In scroll mode the code box fills the available width (like tables and
+// like wrap mode) instead of hugging its own widest line: the border runs
+// edge to edge rather than closing right after the short content.
+TEST(Markdown, CodeBoxFillsWidthInScrollMode) {
+  markit::Config cfg;
+  cfg.horizontal_wrap = markit::WrapMode::Scroll;
+  const std::string md = "```\nhi\n```\n";
+  ftxui::Screen screen(60, 6);
+  ftxui::Render(screen, markit::RenderMarkdown(md, cfg));
+  int border_right = -1;
+  int border_row = -1;
+  for (int r = 0; r < 6 && border_right < 0; ++r) {
+    for (int c = 0; c < 60; ++c) {
+      if (screen.CellAt(c, r).character == "┐") {
+        border_row = r;
+        border_right = c;
+        break;
+      }
+    }
+  }
+  ASSERT_GE(border_right, 0) << "code box border must render";
+  EXPECT_EQ(border_right, 59) << "border must run to the window edge";
+  EXPECT_EQ(screen.CellAt(0, border_row).character, "┌");
+}
+
 // A hard break still forces a new rendered row in wrap mode (it closes the
 // current inline row regardless of wrapping).
 TEST(Markdown, WrapHardBreakForcesNewLine) {
