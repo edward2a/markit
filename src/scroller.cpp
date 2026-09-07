@@ -68,9 +68,19 @@ class ScrollerBase : public ComponentBase {
  private:
   Element OnRender() final {
     Element background = ComponentBase::Render();
-    background->ComputeRequirement();
-    int natural_height = std::max(1, background->requirement().min_y);
-    int natural_width = std::max(1, background->requirement().min_x);
+    // The child tree is often pointer-identical across frames (a pure
+    // content renderer returns its cached tree), and its requirement is
+    // then stable too, so skip the redundant walk. The shared_ptr is
+    // retained to keep the identity key alive: a bare raw pointer could be
+    // recycled by a newly built tree and cause a false cache hit.
+    if (background.get() != rendered_tree_.get()) {
+      background->ComputeRequirement();
+      rendered_tree_ = background;
+      natural_height_ = std::max(1, background->requirement().min_y);
+      natural_width_ = std::max(1, background->requirement().min_x);
+    }
+    int natural_height = natural_height_;
+    int natural_width = natural_width_;
     int viewport_height = std::max(1, *viewport_height_);
     *viewport_height_ = viewport_height;
     int viewport_width = std::max(1, *viewport_width_);
@@ -195,6 +205,9 @@ class ScrollerBase : public ComponentBase {
    int measured_wrap_width_ = -1;
    int measured_wrap_height_ = 1;
    bool wrap_measured_ = false;
+   Element rendered_tree_;
+   int natural_height_ = 1;
+   int natural_width_ = 1;
 };
 
 }  // namespace

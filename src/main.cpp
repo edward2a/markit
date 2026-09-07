@@ -121,16 +121,30 @@ int main(int argc, char** argv) {
   bool hscroll = (config.horizontal_wrap == markit::WrapMode::Scroll);
   const bool is_empty_placeholder = (contents == "(empty file)");
 
-  auto content = Renderer([&] {
-    Element e = markit::RenderMarkdown(contents, content_cfg);
-    return is_empty_placeholder ? e | dim : std::move(e);
-  });
-
   int selected = 0;
   int selected_x = 0;
-  const auto term_size = Terminal::Size();
-  int viewport_height = term_size.dimy;
-  int viewport_width = term_size.dimx;
+  int viewport_height = 0;
+  int viewport_width = 0;
+
+  // Building the content tree re-parses the whole document, so cache it and
+  // rebuild only when the display mode changes. The viewport size is
+  // refreshed on every render instead, so a terminal resize takes effect
+  // immediately (the scroller reads these refs for its layout math).
+  markit::WrapMode rendered_mode = content_cfg.horizontal_wrap;
+  Element cached_content;
+  auto content = Renderer([&] {
+    const auto term_size = Terminal::Size();
+    viewport_width = term_size.dimx;
+    viewport_height = term_size.dimy;
+    if (!cached_content || rendered_mode != content_cfg.horizontal_wrap) {
+      rendered_mode = content_cfg.horizontal_wrap;
+      Element fresh = markit::RenderMarkdown(contents, content_cfg);
+      cached_content =
+          is_empty_placeholder ? fresh | dim : std::move(fresh);
+    }
+    return cached_content;
+  });
+
   auto scroller =
       Scroller(std::move(content), &selected, &viewport_height,
                [&](int before, int after) { log("scroll", before, after); },

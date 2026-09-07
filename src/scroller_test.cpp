@@ -374,3 +374,37 @@ TEST(Scroller, WrapSurvivesModeToggleAtSameWidth) {
   EXPECT_TRUE(scroller->OnEvent(ftxui::Event::Home));
   EXPECT_EQ(selected, 0);
 }
+
+// The scroller tracks the viewport-width ref across renders: narrowing the
+// viewport reflows wrapped content (the last word leaves the first row) and
+// widening again restores the earlier layout.
+TEST(Scroller, WrapAdaptsToViewportWidthChange) {
+  const char* md =
+      "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu\n";
+  int selected = 0;
+  int viewport_height = 72;
+  int selected_x = 0;
+  int viewport_width = 72;
+  bool hscroll = false;
+  markit::Config cfg;
+  auto scroller = ftxui::Scroller(
+      ftxui::Renderer(
+          [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+  auto first_row = [&](int w) {
+    viewport_width = w;
+    ftxui::Screen screen(w, 72);
+    ftxui::Render(screen, scroller->Render());
+    std::string row;
+    for (int c = 0; c < w; ++c) {
+      row += screen.CellAt(c, 0).character;
+    }
+    return row;
+  };
+  EXPECT_NE(first_row(72).find("mu"), std::string::npos)
+      << "66-column paragraph fits on the first row at width 72";
+  EXPECT_EQ(first_row(20).find("mu"), std::string::npos)
+      << "narrowing the viewport wraps the last word off the first row";
+  EXPECT_NE(first_row(72).find("mu"), std::string::npos)
+      << "widening again restores the single-row layout";
+}
