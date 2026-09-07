@@ -110,6 +110,58 @@ TEST(Markdown, Heading) {
   EXPECT_TRUE(AnyLineContains(rows, "World"));
 }
 
+// A heading directly followed by paragraph text owes the paragraph a blank
+// row, at every level (ATX headings end at the newline; the blank comes from
+// the renderer, not the source).
+TEST(Markdown, HeadingFollowedByParagraphHasBlank) {
+  for (const char* md : {"# Hello\nworld\n", "## Hello\nworld\n"}) {
+    auto rows = RenderLines(md, {}, 60, 10);
+    for (auto& line : rows) {
+      while (!line.empty() && line.back() == ' ') {
+        line.pop_back();
+      }
+    }
+    ASSERT_GE(rows.size(), 3u) << md;
+    EXPECT_EQ(rows[0], "Hello") << md;
+    EXPECT_EQ(rows[1], "") << md;
+    EXPECT_EQ(rows[2], "world") << md;
+  }
+}
+
+// When a --- rule follows a heading, the heading's trailing blank transfers
+// past the rule: no blank between heading and rule, single blank after it.
+TEST(Markdown, HeadingHrParagraphBlankAfterRule) {
+  auto rows = RenderLines("# Hello\n---\nworld\n", {}, 60, 10);
+  for (auto& line : rows) {
+    while (!line.empty() && line.back() == ' ') {
+      line.pop_back();
+    }
+  }
+  ASSERT_GE(rows.size(), 4u);
+  EXPECT_EQ(rows[0], "Hello");
+  EXPECT_NE(rows[1].find("─"), std::string::npos)
+      << "row 1 should be the rule, got: " << rows[1];
+  EXPECT_EQ(rows[2], "");
+  EXPECT_EQ(rows[3], "world");
+}
+
+// A standalone --- (no heading before it) keeps its leading-blank-only
+// shape: no new trailing blank is introduced after the rule.
+TEST(Markdown, StandaloneHrKeepsLeadingBlankOnly) {
+  auto rows = RenderLines("para\n\n---\n\nmore\n", {}, 60, 10);
+  for (auto& line : rows) {
+    while (!line.empty() && line.back() == ' ') {
+      line.pop_back();
+    }
+  }
+  ASSERT_GE(rows.size(), 4u);
+  EXPECT_EQ(rows[0], "para");
+  EXPECT_EQ(rows[1], "");
+  EXPECT_NE(rows[2].find("─"), std::string::npos)
+      << "row 2 should be the rule, got: " << rows[2];
+  EXPECT_EQ(rows[3], "more");
+}
+
 // Bold and italic text survive rendering.
 TEST(Markdown, Emphasis) {
   auto rows = RenderLines("some **bold** and *italic* text\n");

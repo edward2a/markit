@@ -56,6 +56,8 @@ class Renderer {
              &parser, this);
 
     FlushPendingHtml();  // trailing verbatim HTML coalesced across blocks.
+    // A heading at EOF still owes its trailing gap, but there is no next
+    // block to take it: drop it (a trailing blank row would be invisible).
     Frame doc = std::move(frames_.back());
     frames_.pop_back();
     if (doc.children.empty()) {
@@ -100,6 +102,11 @@ class Renderer {
     unsigned ordered_index = 0;
     char ordered_mark = '.';
     char cell_align = 0;          // MD_ALIGN value for a table cell
+    // Trailing gap owed after a heading: the next block in this container
+    // inserts one blank row before itself. An HR carries the debt past the
+    // rule instead (blank after the rule, none between heading and rule).
+    // Only set on Doc/Quote parents; tight Item/Cell content stays compact.
+    bool heading_gap = false;
     std::vector<Element> children;
     std::vector<Fragment> inline_;
     std::vector<Element> rows_;      // completed hard-break rows
@@ -146,10 +153,48 @@ class Renderer {
 
   void Attach(Element e, bool blank_before) {
     Frame& parent = Top();
+    if ((parent.kind == Kind::Doc || parent.kind == Kind::Quote) &&
+        parent.heading_gap) {
+      // A heading owes the next block a blank row. The debt subsumes any
+      // leading blank the block would add itself, so H->H gets exactly one.
+      parent.heading_gap = false;
+      if (!parent.children.empty()) {
+        parent.children.push_back(ftxui::text(""));
+      }
+      parent.children.push_back(std::move(e));
+      return;
+    }
     if (blank_before && !parent.children.empty()) {
       parent.children.push_back(ftxui::text(""));
     }
     parent.children.push_back(std::move(e));
+  }
+
+  // Attach a horizontal rule. When it follows a heading the heading's
+  // trailing gap transfers past the rule: no blank between heading and rule,
+  // single blank after the rule (consumed by the next block's Attach).
+  void AttachHr(Element e) {
+    Frame& parent = Top();
+    if ((parent.kind == Kind::Doc || parent.kind == Kind::Quote) &&
+        parent.heading_gap) {
+      parent.children.push_back(std::move(e));
+      return;  // keep heading_gap pending for the block after the rule.
+    }
+    parent.heading_gap = false;
+    if (!parent.children.empty()) {
+      parent.children.push_back(ftxui::text(""));
+    }
+    parent.children.push_back(std::move(e));
+  }
+
+  // Mark the current container as owing the next block a blank row after a
+  // heading. Called after the heading itself attached (which consumed any
+  // previous debt), so H->H still yields exactly one gap row.
+  void OweHeadingGap() {
+    Frame& parent = Top();
+    if (parent.kind == Kind::Doc || parent.kind == Kind::Quote) {
+      parent.heading_gap = true;
+    }
   }
 
   Decorator ComposedStyle() const {
@@ -432,6 +477,7 @@ class Renderer {
     Element e = InlineBlocks(top);
     e = ftxui::bold(std::move(e)) | ftxui::color(HeadingColor(top.heading_level));
     Attach(std::move(e), true);
+    OweHeadingGap();
   }
 
   // Close a <summary> paragraph: disclosure marker (open-state of the
@@ -905,7 +951,7 @@ class Renderer {
       if (!closing) {
         CloseHtmlPara();
         FlushHtmlText();
-        Attach(ftxui::separator(), true);
+        AttachHr(ftxui::separator());
       }
       return;
     }
@@ -1094,7 +1140,7 @@ class Renderer {
         break;
       }
       case MD_BLOCK_HR:
-        Attach(ftxui::separator(), true);
+        AttachHr(ftxui::separator());
         break;
       case MD_BLOCK_QUOTE:
         Push(Frame::Quote());
@@ -1189,6 +1235,7 @@ class Renderer {
         Element e = InlineBlocks(top);
         e = ftxui::bold(e) | ftxui::color(HeadingColor(top.heading_level));
         Attach(std::move(e), true);
+        OweHeadingGap();
         break;
       }
       case MD_BLOCK_QUOTE: {
