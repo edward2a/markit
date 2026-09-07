@@ -157,13 +157,9 @@ TEST(Markdown, TaskList) {
   EXPECT_TRUE(AnyLineContains(rows, "[x] done"));
 }
 
-// Trailing-space hard breaks split a paragraph into one row per source line.
-// Regression: the old "\n" text node inflated the paragraph to two rows, so
-// inline-code background colors bled into the line below and the lines were
-// concatenated horizontally instead of stacked.
-// Raw HTML blocks render their source verbatim (tags included) instead of
-// being dropped: the banner text must appear somewhere in the output.
-TEST(Markdown, HtmlBlockRendersVerbatimText) {
+// HTML blocks render instead of boxing: tags are interpreted (the img alt
+// text shows, banner text flows as a paragraph) and no bordered box appears.
+TEST(Markdown, HtmlBlockRendersInsteadOfBoxing) {
   const std::string md =
       "<p align=\"center\">\n"
       "  <img src=\"https://example.com/pic.png\" alt=\"Demo\"/>\n"
@@ -176,11 +172,200 @@ TEST(Markdown, HtmlBlockRendersVerbatimText) {
   for (const auto& l : lines) {
     joined += l;
   }
-  EXPECT_NE(joined.find("<p align=\"center\">"), std::string::npos)
-      << "raw HTML tags must be preserved";
+  EXPECT_EQ(joined.find("<p align=\"center\">"), std::string::npos)
+      << "tags must render, not show literally";
+  EXPECT_EQ(joined.find("┌"), std::string::npos)
+      << "rendered HTML must not be boxed";
+  EXPECT_NE(joined.find("Demo"), std::string::npos)
+      << "img alt text must show";
   EXPECT_NE(joined.find("Project banner text here."), std::string::npos)
       << "html block text must not be dropped";
   EXPECT_NE(joined.find("After the banner."), std::string::npos);
+}
+
+// Inline HTML tags render with markdown-equivalent styling: bold/italic
+// spans inside a block, no box around them.
+TEST(Markdown, HtmlInlineTagsAreStyled) {
+  const std::string md = "<div>\n<b>bo</b> <i>it</i>\n</div>\n";
+  ftxui::Screen screen(40, 6);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  EXPECT_EQ(screen.CellAt(0, 0).character, "b");
+  EXPECT_TRUE(screen.CellAt(0, 0).bold) << "b tag must be bold";
+  EXPECT_TRUE(screen.CellAt(1, 0).bold) << "b tag must be bold";
+  EXPECT_FALSE(screen.CellAt(0, 0).italic);
+  int icol = -1;
+  for (int c = 0; c < 40; ++c) {
+    if (screen.CellAt(c, 0).character == "i") {
+      icol = c;
+      break;
+    }
+  }
+  ASSERT_GE(icol, 0) << "i tag content must render";
+  EXPECT_TRUE(screen.CellAt(icol, 0).italic) << "i tag must be italic";
+  EXPECT_FALSE(screen.CellAt(icol, 0).bold);
+  for (int c = 0; c < 40; ++c) {
+    EXPECT_NE(screen.CellAt(c, 0).character, "┌") << "no box expected";
+  }
+}
+
+// Anchors render as underlined links, like markdown links.
+TEST(Markdown, HtmlAnchorRendersLink) {
+  const std::string md =
+      "<div>\n<a href=\"https://example.com\">click</a>\n</div>\n";
+  ftxui::Screen screen(40, 6);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  int col = -1;
+  for (int c = 0; c < 40; ++c) {
+    if (screen.CellAt(c, 0).character == "c") {
+      col = c;
+      break;
+    }
+  }
+  ASSERT_GE(col, 0) << "link text must render";
+  EXPECT_TRUE(screen.CellAt(col, 0).underlined) << "a tag must be underlined";
+}
+
+// A <br/> inside HTML ends the current row.
+TEST(Markdown, HtmlBrSplitsRows) {
+  auto rows =
+      TrimmedLines(RenderLines("<div>\naaa<br/>bbb\n</div>\n", {}, 40, 10));
+  ASSERT_GE(rows.size(), 2u);
+  EXPECT_EQ(rows[0], "aaa");
+  EXPECT_EQ(rows[1], "bbb");
+}
+
+// <pre> keeps its verbatim box.
+TEST(Markdown, HtmlPreStaysBoxed) {
+  const std::string md = "<pre>\nint x = 1;\n</pre>\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_NE(joined.find("┌"), std::string::npos) << "pre must stay boxed";
+  EXPECT_NE(joined.find("int x = 1;"), std::string::npos);
+}
+
+// Unknown tags fall back to verbatim: the literal tag stays visible.
+TEST(Markdown, HtmlUnknownTagStaysVerbatim) {
+  const std::string md = "<marquee>\nhello\n</marquee>\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_NE(joined.find("<marquee>"), std::string::npos)
+      << "unknown tags must stay literal";
+  EXPECT_NE(joined.find("hello"), std::string::npos);
+}
+
+// md4c splits one HTML run into several blocks at blank lines; verbatim
+// content coalesces into a single box instead of one box per block.
+TEST(Markdown, HtmlConsecutiveBlocksShareOneBox) {
+  const std::string md = "<!-- one -->\n\n<!-- two -->\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_NE(joined.find("one"), std::string::npos);
+  EXPECT_NE(joined.find("two"), std::string::npos);
+  size_t boxes = 0;
+  for (size_t pos = joined.find("┌"); pos != std::string::npos;
+       pos = joined.find("┌", pos + 1)) {
+    ++boxes;
+  }
+  EXPECT_EQ(boxes, 1u) << "consecutive HTML must share one box";
+}
+
+// <script> contents are never interpreted and stay in a single box.
+TEST(Markdown, HtmlScriptStaysInOneBox) {
+  const std::string md = "<script>\nvar x = 1;\n</script>\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_NE(joined.find("var x = 1;"), std::string::npos);
+  size_t boxes = 0;
+  for (size_t pos = joined.find("┌"); pos != std::string::npos;
+       pos = joined.find("┌", pos + 1)) {
+    ++boxes;
+  }
+  EXPECT_EQ(boxes, 1u) << "script must stay in a single box";
+}
+
+// Inline tags also render inside markdown paragraphs (which is where md4c
+// reports single-line markup like <i>...</i>): the tags disappear and the
+// text carries the style.
+TEST(Markdown, HtmlItalicParagraphRenders) {
+  const std::string md = "<i>Functional Terminal (X) User interface</i>\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_EQ(joined.find("<i>"), std::string::npos)
+      << "i tag must render, not show literally";
+  EXPECT_NE(joined.find("Functional"), std::string::npos);
+  ftxui::Screen screen(40, 10);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  EXPECT_EQ(screen.CellAt(0, 0).character, "F");
+  EXPECT_TRUE(screen.CellAt(0, 0).italic) << "i tag must be italic";
+}
+
+// Bold inside a mixed markdown paragraph renders; surrounding text is kept.
+TEST(Markdown, HtmlBoldInParagraphRenders) {
+  const std::string md = "a <b>bo</b> c\n";
+  auto lines = RenderLines(md, {}, 40, 4);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_EQ(joined.find("<b>"), std::string::npos);
+  EXPECT_NE(joined.find("a bo c"), std::string::npos);
+  ftxui::Screen screen(40, 4);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  EXPECT_TRUE(screen.CellAt(2, 0).bold) << "b tag must be bold";
+  EXPECT_FALSE(screen.CellAt(0, 0).bold) << "surrounding text stays plain";
+}
+
+// A stray closing tag in a paragraph is ignored and must not pop a
+// markdown span: emphasis around it keeps working.
+TEST(Markdown, HtmlStrayCloseInParagraphIgnored) {
+  const std::string md = "*e* </b> f\n";
+  ftxui::Screen screen(40, 4);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  EXPECT_EQ(screen.CellAt(0, 0).character, "e");
+  EXPECT_TRUE(screen.CellAt(0, 0).italic)
+      << "markdown emphasis must survive a stray HTML close";
+  auto lines = RenderLines(md, {}, 40, 4);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_NE(joined.find("e"), std::string::npos);
+  EXPECT_NE(joined.find("f"), std::string::npos);
+}
+
+// Anchors in paragraphs render as underlined links.
+TEST(Markdown, HtmlAnchorInParagraphRendersLink) {
+  const std::string md =
+      "a <a href=\"https://example.com\">click</a> b\n";
+  ftxui::Screen screen(40, 4);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  int col = -1;
+  for (int c = 0; c < 40; ++c) {
+    if (screen.CellAt(c, 0).character == "c") {
+      col = c;
+      break;
+    }
+  }
+  ASSERT_GE(col, 0) << "link text must render";
+  EXPECT_TRUE(screen.CellAt(col, 0).underlined)
+      << "a tag in a paragraph must be underlined";
+  EXPECT_FALSE(screen.CellAt(0, 0).underlined)
+      << "surrounding text stays plain";
 }
 
 TEST(Markdown, HardBreakLines) {

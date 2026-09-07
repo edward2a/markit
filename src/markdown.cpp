@@ -4,6 +4,7 @@
 #include <md4c.h>
 
 #include <algorithm>  // for max
+#include <cctype>     // for tolower/isspace/isalnum (HTML tag parsing)
 #include <string>     // for string, to_string
 #include <utility>    // for move
 #include <vector>     // for vector
@@ -54,6 +55,7 @@ class Renderer {
     md_parse(reinterpret_cast<const MD_CHAR*>(source_.data()), source_.size(),
              &parser, this);
 
+    FlushPendingHtml();  // trailing verbatim HTML coalesced across blocks.
     Frame doc = std::move(frames_.back());
     frames_.pop_back();
     if (doc.children.empty()) {
@@ -323,6 +325,666 @@ class Renderer {
     return ftxui::vbox(std::move(frame.rows_));
   }
 
+  // ---- HTML rendering ---------------------------------------------------
+  // md4c delivers raw HTML as opaque MD_TEXT_HTML chunks (it never parses
+  // tags). Inside an HTML block, interpret a small subset of tags and map
+  // them onto the same decorators/frames markdown uses; anything else
+  // (<pre>, <script>/<style>, unknown tags) stays verbatim in a code box.
+  // md4c splits one HTML run into several MD_BLOCK_HTML blocks at blank
+  // lines, so pure-verbatim frames coalesce into pending_html_ and attach
+  // as a single box instead of one box per block.
+
+  static std::string ToLower(std::string s) {
+    for (char& c : s) {
+      c = static_cast<char>(
+          std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s;
+  }
+
+  static bool IsHtmlSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+  }
+
+  static bool IsAllSpace(const std::string& s) {
+    for (char c : s) {
+      if (!IsHtmlSpace(c)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static bool IsTagChar(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '-' ||
+           c == ':' || c == '_';
+  }
+
+  // Nearest enclosing Html frame, or nullptr outside an HTML block.
+  Frame* HtmlFrame() {
+    for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
+      if (it->kind == Kind::Html) {
+        return &*it;
+      }
+    }
+    return nullptr;
+  }
+
+  // Flush coalesced verbatim HTML (from consecutive HTML blocks split at
+  // blank lines) as one box. Called when non-HTML content starts and at the
+  // end of the document.
+  void FlushPendingHtml() {
+    if (pending_html_.empty() || IsAllSpace(pending_html_)) {
+      pending_html_.clear();
+      return;
+    }
+    Attach(CodeElement(pending_html_, wrap_), true);
+    pending_html_.clear();
+  }
+
+  static bool IsInlineCapable(Kind kind) {
+    return kind == Kind::Item || kind == Kind::Heading ||
+           kind == Kind::Para || kind == Kind::Cell;
+  }
+
+  // Open an inline-capable frame for HTML text when tags/text arrive with a
+  // container (Html/Quote/List) on top; reuse it when one is already open.
+  // Other frames (Table/Row/Code/Doc) cannot occur inside an HTML block, so
+  // text there is dropped rather than corrupting the stack.
+  void EnsureHtmlPara() {
+    Kind kind = Top().kind;
+    if (IsInlineCapable(kind)) {
+      return;
+    }
+    if (kind != Kind::Html && kind != Kind::Quote && kind != Kind::List) {
+      return;
+    }
+    Push(Frame::Para());
+  }
+
+  void CloseHtmlPara() {
+    if (Top().kind != Kind::Para) {
+      html_align_ = 0;
+      return;
+    }
+    Frame top = Pop();
+    if (top.inline_.empty() && top.rows_.empty()) {
+      html_align_ = 0;  // empty <p></p>: no blank row.
+      return;
+    }
+    Element e = InlineBlocks(top);
+    if (html_align_ == 'c') {
+      e = ftxui::hcenter(std::move(e));
+    }
+    html_align_ = 0;
+    Attach(std::move(e), true);
+  }
+
+  void CloseHtmlHeading() {
+    if (Top().kind != Kind::Heading) {
+      return;
+    }
+    Frame top = Pop();
+    Element e = InlineBlocks(top);
+    e = ftxui::bold(std::move(e)) | ftxui::color(HeadingColor(top.heading_level));
+    Attach(std::move(e), true);
+  }
+
+  // Box the Html frame's verbatim remainder, preserving document order: at
+  // the Html top level it joins the frame's children (boxed together with
+  // any coalesced neighbours at leave); nested in a quote/list it attaches
+  // to the current container so it stays inside the structure.
+  void FlushHtmlText() {
+    Frame* h = HtmlFrame();
+    if (h == nullptr || h->text.empty() || IsAllSpace(h->text)) {
+      if (h != nullptr) {
+        h->text.clear();
+      }
+      return;
+    }
+    Element box = CodeElement(h->text, wrap_);
+    h->text.clear();
+    if (&Top() == h) {
+      h->children.push_back(std::move(box));
+    } else {
+      Attach(std::move(box), true);
+    }
+  }
+
+  void HtmlInlineText(const std::string& text) {
+    if (text.empty()) {
+      return;
+    }
+    if (IsInlineCapable(Top().kind)) {
+      EmitInline(text);
+      return;
+    }
+    if (IsAllSpace(text)) {
+      return;  // indentation/newlines between block tags.
+    }
+    const size_t before = frames_.size();
+    EnsureHtmlPara();
+    if (frames_.size() == before) {
+      return;  // unexpected frame; drop rather than corrupt the stack.
+    }
+    EmitInline(text);
+  }
+
+  // A <br> break: end the current row, forcing a blank row when the
+  // paragraph is empty so consecutive breaks stay visible.
+  void HtmlBreak() {
+    EnsureHtmlPara();
+    if (!IsInlineCapable(Top().kind)) {
+      return;
+    }
+    Frame& para = Top();
+    if (para.inline_.empty()) {
+      para.rows_.push_back(ftxui::text(""));
+    } else {
+      FlushRow(para);
+    }
+  }
+
+  // Verbatim fallback: styled inline in running text, boxed at block level.
+  void HtmlVerbatim(const std::string& text) {
+    if (text.empty()) {
+      return;
+    }
+    Frame& top = Top();
+    if (IsInlineCapable(top.kind)) {
+      span_decorators_.push_back(InlineCodeStyle());
+      span_keys_.push_back("code");
+      EmitInline(text);
+      span_decorators_.pop_back();
+      span_keys_.pop_back();
+      return;
+    }
+    if (top.kind == Kind::Html) {
+      top.text += text;
+      return;
+    }
+    Attach(CodeElement(text, wrap_), true);
+  }
+
+  // Parse `name="value"` / `name='value'` / `name=value` / bare names from a
+  // tag body (everything between `<name` and `>`). Names are lowercased.
+  static std::vector<std::pair<std::string, std::string>> ParseHtmlAttrs(
+      const std::string& body) {
+    std::vector<std::pair<std::string, std::string>> attrs;
+    size_t i = 0;
+    const size_t n = body.size();
+    while (i < n) {
+      while (i < n && IsHtmlSpace(body[i])) {
+        ++i;
+      }
+      if (i >= n || body[i] == '/') {
+        break;
+      }
+      size_t j = i;
+      while (j < n && IsTagChar(body[j])) {
+        ++j;
+      }
+      if (j == i) {
+        ++i;
+        continue;
+      }
+      std::string name = ToLower(body.substr(i, j - i));
+      i = j;
+      while (i < n && IsHtmlSpace(body[i])) {
+        ++i;
+      }
+      std::string value;
+      if (i < n && body[i] == '=') {
+        ++i;
+        while (i < n && IsHtmlSpace(body[i])) {
+          ++i;
+        }
+        if (i < n && (body[i] == '"' || body[i] == '\'')) {
+          const char quote = body[i++];
+          const size_t end = body.find(quote, i);
+          if (end == std::string::npos) {
+            value = body.substr(i);
+            i = n;
+          } else {
+            value = body.substr(i, end - i);
+            i = end + 1;
+          }
+        } else {
+          size_t k = i;
+          while (k < n && !IsHtmlSpace(body[k]) && body[k] != '>') {
+            ++k;
+          }
+          value = body.substr(i, k - i);
+          i = k;
+        }
+      }
+      attrs.emplace_back(std::move(name), std::move(value));
+    }
+    return attrs;
+  }
+
+  static std::string HtmlAttr(
+      const std::vector<std::pair<std::string, std::string>>& attrs,
+      const std::string& name) {
+    for (const auto& [key, value] : attrs) {
+      if (key == name) {
+        return value;
+      }
+    }
+    return {};
+  }
+
+  static bool IsVoidElement(const std::string& name) {
+    return name == "br" || name == "hr" || name == "img" ||
+           name == "meta" || name == "link" || name == "input" ||
+           name == "source" || name == "wbr";
+  }
+
+  // Push an inline style for an opening tag (reusing the markdown span
+  // machinery, so wrap-mode style continuity applies to HTML content too).
+  void HtmlOpenSpan(Decorator style, const std::string& key) {
+    EnsureHtmlPara();
+    if (!IsInlineCapable(Top().kind)) {
+      return;
+    }
+    span_decorators_.push_back(std::move(style));
+    span_keys_.push_back(key);
+    ++html_open_count_;
+  }
+
+  // Pop for a closing tag. Strict: only the matching entry goes, so a stray
+  // close in a markdown paragraph can never pop a markdown span (or vice
+  // versa); unclosed entries die with the enclosing block anyway.
+  void HtmlCloseSpan(const std::string& key, bool prefix = false) {
+    if (html_open_count_ == 0 || span_keys_.empty() ||
+        span_decorators_.empty()) {
+      return;
+    }
+    const std::string& top = span_keys_.back();
+    const bool match =
+        prefix ? (top.size() >= key.size() &&
+                  top.compare(0, key.size(), key) == 0)
+               : (top == key);
+    if (!match) {
+      return;
+    }
+    span_decorators_.pop_back();
+    span_keys_.pop_back();
+    --html_open_count_;
+  }
+
+  void HandleHtmlTag(const std::string& inner, const std::string& raw) {
+    // Comments, doctypes, processing instructions: always verbatim.
+    if (inner.size() >= 3 && inner[0] == '!' && inner[1] == '-' &&
+        inner[2] == '-') {
+      HtmlVerbatim(raw);
+      return;
+    }
+    if (!inner.empty() && (inner[0] == '!' || inner[0] == '?')) {
+      HtmlVerbatim(raw);
+      return;
+    }
+    size_t i = 0;
+    bool closing = false;
+    if (i < inner.size() && inner[i] == '/') {
+      closing = true;
+      ++i;
+    }
+    size_t j = i;
+    while (j < inner.size() && IsTagChar(inner[j])) {
+      ++j;
+    }
+    const std::string name = ToLower(inner.substr(i, j - i));
+    if (name.empty()) {
+      HtmlVerbatim(raw);
+      return;
+    }
+    if (closing && IsVoidElement(name)) {
+      return;  // stray `</img>` / `</br>`: nothing to close.
+    }
+    const auto attrs = ParseHtmlAttrs(inner.substr(j));
+
+    // Inline elements (also interpreted in markdown paragraphs; see the
+    // html_inline_only_ gate for block/rawtext below).
+    if (name == "b" || name == "strong") {
+      if (closing) {
+        HtmlCloseSpan("b");
+      } else {
+        HtmlOpenSpan(ftxui::bold, "b");
+      }
+      return;
+    }
+    if (name == "i" || name == "em") {
+      if (closing) {
+        HtmlCloseSpan("i");
+      } else {
+        HtmlOpenSpan(ftxui::italic, "i");
+      }
+      return;
+    }
+    if (name == "u") {
+      if (closing) {
+        HtmlCloseSpan("u");
+      } else {
+        HtmlOpenSpan(ftxui::underlined, "u");
+      }
+      return;
+    }
+    if (name == "s" || name == "del" || name == "strike") {
+      if (closing) {
+        HtmlCloseSpan("s");
+      } else {
+        HtmlOpenSpan(ftxui::strikethrough, "s");
+      }
+      return;
+    }
+    if (name == "code") {
+      if (closing) {
+        HtmlCloseSpan("code");
+      } else {
+        HtmlOpenSpan(InlineCodeStyle(), "code");
+      }
+      return;
+    }
+    if (name == "a") {
+      if (closing) {
+        HtmlCloseSpan("a:", true);
+      } else {
+        const std::string href = HtmlAttr(attrs, "href");
+        HtmlOpenSpan(href.empty() ? Decorator(ftxui::underlined)
+                                  : LinkStyle(href),
+                     "a:" + href);
+      }
+      return;
+    }
+    if (name == "img") {
+      if (!closing) {
+        EnsureHtmlPara();
+        if (!IsInlineCapable(Top().kind)) {
+          return;
+        }
+        const std::string alt = HtmlAttr(attrs, "alt");
+        span_decorators_.push_back(ftxui::dim);
+        span_keys_.push_back("img");
+        EmitInline(alt.empty() ? "[img]" : alt);
+        span_decorators_.pop_back();
+        span_keys_.pop_back();
+      }
+      return;
+    }
+    if (name == "br") {
+      if (!closing) {
+        HtmlBreak();
+      }
+      return;
+    }
+
+    // Rawtext elements: buffer everything verbatim until the matching close.
+    // <pre> renders as a code box; <script>/<style> contents are never
+    // interpreted, only shown code-styled in a single coalesced box.
+    // Block-only: inside a markdown paragraph these stay verbatim (and must
+    // never swallow the surrounding markdown text into rawtext).
+    if (name == "pre" || name == "script" || name == "style") {
+      if (html_inline_only_) {
+        HtmlVerbatim(raw);
+        return;
+      }
+      if (closing) {
+        if (name != raw_tag_) {
+          HtmlVerbatim(raw);  // stray close outside rawtext.
+          return;
+        }
+        // The newline right after the opening tag is source formatting, not
+        // content (browsers drop it in <pre> too).
+        if (!raw_buf_.empty() && raw_buf_[0] == '\n') {
+          raw_buf_.erase(0, 1);
+        }
+        if (IsInlineCapable(Top().kind)) {
+          // Invalid nesting (<pre> inside running text): fall back to
+          // styled inline rather than corrupting the stack.
+          span_decorators_.push_back(InlineCodeStyle());
+          span_keys_.push_back("code");
+          EmitInline(raw_buf_);
+          span_decorators_.pop_back();
+          span_keys_.pop_back();
+        } else if (Top().kind == Kind::Html) {
+          Top().text += raw_buf_;
+        } else {
+          Attach(CodeElement(raw_buf_, wrap_), true);
+        }
+        raw_tag_.clear();
+        raw_buf_.clear();
+      } else {
+        CloseHtmlPara();
+        FlushHtmlText();
+        raw_tag_ = name;
+        raw_buf_.clear();
+      }
+      return;
+    }
+
+    // Block elements. Block-only: inside a markdown paragraph a block tag
+    // would pop the paragraph's own frame, so it stays verbatim instead.
+    if (html_inline_only_ &&
+        (name == "p" || name == "div" || name == "blockquote" ||
+         name == "ul" || name == "ol" || name == "li" || name == "hr" ||
+         (name.size() == 2 && name[0] == 'h' && name[1] >= '1' &&
+          name[1] <= '6'))) {
+      HtmlVerbatim(raw);
+      return;
+    }
+    if (name == "p" || name == "div") {
+      CloseHtmlPara();
+      FlushHtmlText();
+      if (!closing) {
+        html_align_ =
+            (ToLower(HtmlAttr(attrs, "align")) == "center") ? 'c' : 0;
+      }
+      return;
+    }
+    if (name.size() == 2 && name[0] == 'h' && name[1] >= '1' &&
+        name[1] <= '6') {
+      if (closing) {
+        CloseHtmlHeading();
+      } else {
+        CloseHtmlPara();
+        FlushHtmlText();
+        if (Top().kind == Kind::Heading) {
+          CloseHtmlHeading();
+        }
+        Push(Frame::Heading(name[1] - '0'));
+      }
+      return;
+    }
+    if (name == "blockquote") {
+      if (closing) {
+        CloseHtmlPara();
+        FlushHtmlText();
+        if (Top().kind == Kind::Quote) {
+          LeaveBlockImpl(MD_BLOCK_QUOTE, nullptr);
+        }
+      } else {
+        CloseHtmlPara();
+        FlushHtmlText();
+        Push(Frame::Quote());
+      }
+      return;
+    }
+    if (name == "ul" || name == "ol") {
+      if (closing) {
+        CloseHtmlPara();
+        FlushHtmlText();
+        if (Top().kind == Kind::Item) {
+          LeaveBlockImpl(MD_BLOCK_LI, nullptr);  // implicit </li>.
+        }
+        if (Top().kind == Kind::List) {
+          // MD_BLOCK_UL/OL leave paths are identical (vbox of children).
+          LeaveBlockImpl(MD_BLOCK_UL, nullptr);
+        }
+      } else {
+        CloseHtmlPara();
+        FlushHtmlText();
+        Frame list = Frame::List();
+        if (name == "ul") {
+          list.bullet = '-';
+        } else {
+          list.ordered_index = 1;
+          list.ordered_mark = '.';
+        }
+        Push(std::move(list));
+      }
+      return;
+    }
+    if (name == "li") {
+      if (closing) {
+        CloseHtmlPara();
+        FlushHtmlText();
+        if (Top().kind == Kind::Item) {
+          LeaveBlockImpl(MD_BLOCK_LI, nullptr);
+        }
+      } else {
+        if (Top().kind == Kind::Item) {
+          LeaveBlockImpl(MD_BLOCK_LI, nullptr);  // implicit </li>.
+        }
+        CloseHtmlPara();
+        FlushHtmlText();
+        if (Top().kind != Kind::List) {
+          HtmlVerbatim(raw);  // stray <li> outside a list.
+          return;
+        }
+        // Number/bullet like a markdown item (see MD_BLOCK_LI enter).
+        Frame& list = Top();
+        Frame item = Frame::Item();
+        item.bullet = list.bullet;
+        item.ordered_index = list.ordered_index;
+        item.ordered_mark = list.ordered_mark;
+        if (list.bullet == 0) {
+          ++list.ordered_index;
+        }
+        Push(std::move(item));
+      }
+      return;
+    }
+    if (name == "hr") {
+      if (!closing) {
+        CloseHtmlPara();
+        FlushHtmlText();
+        Attach(ftxui::separator(), true);
+      }
+      return;
+    }
+
+    // Unknown tags: verbatim, like today's inline-HTML styling.
+    HtmlVerbatim(raw);
+  }
+
+  // Find `</name>` (case-insensitive, allowing whitespace) at or after
+  // `from`; returns the '<' index or npos.
+  static size_t FindHtmlCloseTag(const std::string& buf, size_t from,
+                                 const std::string& name) {
+    for (size_t lt = buf.find('<', from); lt != std::string::npos;
+         lt = buf.find('<', lt + 1)) {
+      size_t k = lt + 1;
+      while (k < buf.size() && IsHtmlSpace(buf[k])) {
+        ++k;
+      }
+      if (k >= buf.size() || buf[k] != '/') {
+        continue;
+      }
+      ++k;
+      while (k < buf.size() && IsHtmlSpace(buf[k])) {
+        ++k;
+      }
+      size_t m = k;
+      while (m < buf.size() && IsTagChar(buf[m])) {
+        ++m;
+      }
+      if (ToLower(buf.substr(k, m - k)) != name) {
+        continue;
+      }
+      if (m >= buf.size() || buf[m] == '>' || IsHtmlSpace(buf[m]) ||
+          buf[m] == '/') {
+        return lt;
+      }
+    }
+    return std::string::npos;
+  }
+
+  // Interpret one MD_TEXT_HTML chunk. Tags may arrive split across md4c
+  // callbacks, so an unterminated tag stays buffered in html_chunk_.
+  void HtmlText(const std::string& s) {
+    html_chunk_ += s;
+    size_t pos = 0;
+    while (pos < html_chunk_.size()) {
+      if (!raw_tag_.empty()) {
+        const size_t lt = FindHtmlCloseTag(html_chunk_, pos, raw_tag_);
+        if (lt == std::string::npos) {
+          raw_buf_ += html_chunk_.substr(pos);
+          html_chunk_.clear();
+          return;
+        }
+        raw_buf_ += html_chunk_.substr(pos, lt - pos);
+        const size_t gt = html_chunk_.find('>', lt + 1);
+        // Keep the '/' prefix: HandleHtmlTag detects closes from inner[0].
+        const std::string inner =
+            "/" + html_chunk_.substr(lt + 2, gt - lt - 2);
+        const std::string raw = html_chunk_.substr(lt, gt - lt + 1);
+        html_chunk_ = html_chunk_.substr(gt + 1);
+        pos = 0;
+        HandleHtmlTag(inner, raw);
+        continue;
+      }
+      const size_t lt = html_chunk_.find('<', pos);
+      if (lt == std::string::npos) {
+        HtmlInlineText(html_chunk_.substr(pos));
+        html_chunk_.clear();
+        return;
+      }
+      if (lt > pos) {
+        HtmlInlineText(html_chunk_.substr(pos, lt - pos));
+      }
+      if (html_chunk_.compare(lt, 4, "<!--") == 0) {
+        const size_t end = html_chunk_.find("-->", lt + 4);
+        if (end == std::string::npos) {
+          html_chunk_ = html_chunk_.substr(lt);
+          return;
+        }
+        HtmlVerbatim(html_chunk_.substr(lt, end + 3 - lt));
+        pos = end + 3;
+        continue;
+      }
+      const size_t gt = html_chunk_.find('>', lt + 1);
+      if (gt == std::string::npos) {
+        html_chunk_ = html_chunk_.substr(lt);  // partial tag; await more.
+        return;
+      }
+      HandleHtmlTag(html_chunk_.substr(lt + 1, gt - lt - 1),
+                    html_chunk_.substr(lt, gt - lt + 1));
+      pos = gt + 1;
+    }
+    html_chunk_.clear();
+  }
+
+  // End inline-HTML interpretation for a markdown block: a tag split
+  // across md4c callbacks that never completed shows literally (rather than
+  // leaking into the next block), and unclosed tag entries reset so later
+  // stray closes have nothing to pop. No-op inside HTML blocks (the HTML
+  // leave path handles its own state).
+  void EndHtmlParaContext() {
+    if (in_html_) {
+      return;
+    }
+    if (!html_chunk_.empty()) {
+      span_decorators_.push_back(InlineCodeStyle());
+      span_keys_.push_back("code");
+      EmitInline(html_chunk_);
+      span_decorators_.pop_back();
+      span_keys_.pop_back();
+      html_chunk_.clear();
+    }
+    html_open_count_ = 0;
+  }
+
   // ---- md4c callback dispatchers -----------------------------------------
   static int cb_enter_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
     return static_cast<Renderer*>(userdata)->EnterBlockImpl(type, detail);
@@ -343,7 +1005,14 @@ class Renderer {
 
   // ---- md4c callbacks -----------------------------------------------------
   int EnterBlockImpl(MD_BLOCKTYPE type, void* detail) {
+    if (type != MD_BLOCK_HTML) {
+      // Blank lines produce no callbacks, so consecutive HTML blocks reach
+      // here untouched and their verbatim text coalesces into one box.
+      FlushPendingHtml();
+    }
     switch (type) {
+      case MD_BLOCK_DOC:
+        break;
       case MD_BLOCK_P:
         Push(Frame::Para());
         break;
@@ -392,6 +1061,8 @@ class Renderer {
         Push(Frame::Code());
         break;
       case MD_BLOCK_HTML:
+        in_html_ = true;
+        span_depth_ = span_decorators_.size();
         Push(Frame::Html());
         break;
       case MD_BLOCK_TABLE: {
@@ -428,8 +1099,6 @@ class Renderer {
                          type == MD_BLOCK_TH));
         break;
       }
-      case MD_BLOCK_DOC:
-        break;
     }
     return 0;
   }
@@ -437,11 +1106,13 @@ class Renderer {
   int LeaveBlockImpl(MD_BLOCKTYPE type, void* /*detail*/) {
     switch (type) {
       case MD_BLOCK_P: {
+        EndHtmlParaContext();
         Frame top = Pop();
         Attach(InlineBlocks(top), false);
         break;
       }
       case MD_BLOCK_H: {
+        EndHtmlParaContext();
         Frame top = Pop();
         Element e = InlineBlocks(top);
         e = ftxui::bold(e) | ftxui::color(HeadingColor(top.heading_level));
@@ -467,6 +1138,7 @@ class Renderer {
         break;
       }
       case MD_BLOCK_LI: {
+        EndHtmlParaContext();
         Frame top = Pop();
         // In a tight list md4c sends the item text directly into this frame
         // (no wrapping paragraph), so flush any pending inline fragments.
@@ -498,7 +1170,80 @@ class Renderer {
       }
       case MD_BLOCK_CODE:
       case MD_BLOCK_HTML: {
+        if (type == MD_BLOCK_HTML) {
+          in_html_ = false;
+          // A tag split across md4c chunks never closed: show it literally.
+          if (!html_chunk_.empty()) {
+            HtmlInlineText(html_chunk_);
+            html_chunk_.clear();
+          }
+          // Auto-close unclosed tags (browser-style forgiveness).
+          while (Top().kind != Kind::Html) {
+            const Kind kind = Top().kind;
+            if (kind == Kind::Para) {
+              CloseHtmlPara();
+            } else if (kind == Kind::Heading) {
+              CloseHtmlHeading();
+            } else if (kind == Kind::Quote) {
+              LeaveBlockImpl(MD_BLOCK_QUOTE, nullptr);
+            } else if (kind == Kind::List) {
+              // MD_BLOCK_UL/OL leave paths are identical.
+              LeaveBlockImpl(MD_BLOCK_UL, nullptr);
+            } else if (kind == Kind::Item) {
+              LeaveBlockImpl(MD_BLOCK_LI, nullptr);
+            } else {
+              break;  // Table/Row/Cell/Code cannot occur here; avoid a loop.
+            }
+          }
+          if (!raw_tag_.empty()) {
+            // Unterminated <pre>/<script>: keep what was buffered.
+            if (Top().kind == Kind::Html) {
+              Top().text += raw_buf_;
+            }
+            raw_tag_.clear();
+            raw_buf_.clear();
+          }
+          if (span_decorators_.size() > span_depth_) {
+            span_decorators_.resize(span_depth_);
+            span_keys_.resize(span_depth_);
+          }
+          html_open_count_ = 0;
+          html_align_ = 0;
+        }
         Frame top = Pop();
+        if (type == MD_BLOCK_HTML && top.children.empty()) {
+          // Pure verbatim: coalesce with neighbouring HTML blocks (split at
+          // blank lines) instead of one box per block. (The remainder is
+          // still in top.text here: boxing happens only via FlushHtmlText
+          // at tag boundaries, never at leave, so this check can see it.)
+          if (!top.text.empty() && !IsAllSpace(top.text)) {
+            if (!pending_html_.empty() && pending_html_.back() != '\n') {
+              pending_html_ += '\n';
+            }
+            pending_html_ += top.text;
+          }
+          break;  // flushed by later content or at the end of the document.
+        }
+        if (type == MD_BLOCK_HTML) {
+          // Rendered blocks attach as ordinary elements (single or stacked).
+          // A verbatim remainder joins them after the rendered children.
+          Elements out;
+          if (!pending_html_.empty() && !IsAllSpace(pending_html_)) {
+            out.push_back(CodeElement(pending_html_, wrap_));
+          }
+          pending_html_.clear();
+          for (auto& c : top.children) {
+            out.push_back(std::move(c));
+          }
+          if (!top.text.empty() && !IsAllSpace(top.text)) {
+            out.push_back(CodeElement(top.text, wrap_));
+          }
+          Attach(out.size() == 1 ? std::move(out[0])
+                                 : ftxui::vbox(std::move(out)),
+                 true);
+          break;
+        }
+        pending_html_.clear();
         Attach(CodeElement(top.text, wrap_), true);
         break;
       }
@@ -523,6 +1268,7 @@ class Renderer {
       }
       case MD_BLOCK_TH:
       case MD_BLOCK_TD: {
+        EndHtmlParaContext();
         Frame top = Pop();
         Frame& row = Top();
         if (row.kind != Kind::Row) {
@@ -633,30 +1379,36 @@ class Renderer {
         // A trailing-streak hard break ends the current inline row instead of
         // embedding a "\n" text node (which would inflate the row height and
         // make background decorators bleed onto the line below).
-        FlushRow(Top());
+        if (in_html_) {
+          HtmlBreak();
+        } else {
+          FlushRow(Top());
+        }
         break;
       case MD_TEXT_CODE: {
         Frame& top = Top();
-        if (top.kind == Kind::Code || top.kind == Kind::Html) {
+        if (top.kind == Kind::Code) {
           top.text += s;
+        } else if (in_html_) {
+          HtmlText(s);
         } else {
           EmitInline(s);
         }
         break;
       }
       case MD_TEXT_HTML:
-        // Raw HTML block markup is buffered verbatim inside the current
-        // Code/Html frame (like fenced code). Inline HTML inside running
-        // text has no verbatim frame, so emit it verbatim with inline-code
-        // styling instead of dropping it.
-        if (Top().kind == Kind::Code || Top().kind == Kind::Html) {
+        // Fenced code stays literal. Inside an HTML block tags are fully
+        // interpreted (HtmlText); inline HTML in running markdown text
+        // interprets inline tags only (b/i/code/a/...) so common markup
+        // like <i> renders, while block-level tags stay verbatim.
+        if (Top().kind == Kind::Code) {
           Top().text += s;
+        } else if (in_html_) {
+          HtmlText(s);
         } else {
-          span_decorators_.push_back(InlineCodeStyle());
-          span_keys_.push_back("code");
-          EmitInline(s);
-          span_decorators_.pop_back();
-          span_keys_.pop_back();
+          html_inline_only_ = true;
+          HtmlText(s);
+          html_inline_only_ = false;
         }
         break;
       default:
@@ -811,6 +1563,18 @@ class Renderer {
   std::vector<Frame> frames_;
   std::vector<Decorator> span_decorators_;
   std::vector<std::string> span_keys_;
+  // HTML interpretation state (see the HTML rendering helpers above).
+  bool in_html_ = false;
+  // Inside a markdown paragraph only inline tags interpret; block-level
+  // tags stay verbatim so they cannot pop the paragraph's own frame.
+  bool html_inline_only_ = false;
+  size_t html_open_count_ = 0;  // entries HtmlOpenSpan pushed (strict closes).
+  size_t span_depth_ = 0;   // span-stack depth at the HTML block entry.
+  std::string html_chunk_;  // partial tag carried across TextImpl calls.
+  std::string raw_tag_;     // open rawtext element (pre/script/style).
+  std::string raw_buf_;     // buffered rawtext content.
+  std::string pending_html_;  // verbatim HTML coalesced across blocks.
+  char html_align_ = 0;       // 'c' inside <p>/<div align=center>.
 };
 
 }  // namespace
