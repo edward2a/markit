@@ -63,3 +63,4 @@ Change tag:
 ## 0.0.5 - 2026-09-07T11:42:18Z
 
 - 2026-09-07T11:42:18Z - add - Milestone 5 static chrome: status bar (basename + scroll position + wrap/scroll mode, inverted), action bar (key hints, dim), and full-height right navigation bar (TOC from document headings, "Outline" title); nav toggles live with 'n', defaults to display.navigation visible|hidden, content viewport shrinks around the chrome
+- 2026-09-07T13:49:40Z - mod - Collapse HTML inline whitespace to single spaces: newlines/indentation between anchors no longer reach text() elements where hflow broke the row and stranded styled spaces as a phantom underlined line below the links carrying the same URLs

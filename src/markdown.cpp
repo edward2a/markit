@@ -289,7 +289,10 @@ class Renderer {
           if (!cur.empty()) {
             finish();
           }
-          pending += frag.text.substr(i, j - i);  // inter-word whitespace
+          // Inter-word whitespace: normalize tabs/newlines to spaces so no
+          // text() element ever contains "\n" (hflow would break the row on
+          // it, stranding styled spaces on the next visual line).
+          pending.append(j - i, ' ');
           i = j;
         } else {
           size_t j = i;
@@ -398,6 +401,29 @@ class Renderer {
       }
     }
     return true;
+  }
+
+  // Collapse HTML whitespace: any run of space/tab/CR/LF becomes one space,
+  // like browsers (and like md4c soft breaks, which arrive as " "). Raw
+  // newlines must never reach a text() element: hflow treats "\n" as a row
+  // break, stranding styled (underlined/hyperlink) spaces on the next visual
+  // row as a phantom underlined line carrying the link URL.
+  static std::string CollapseHtmlSpace(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    bool in_space = false;
+    for (char c : s) {
+      if (IsHtmlSpace(c)) {
+        if (!in_space) {
+          out += ' ';
+          in_space = true;
+        }
+      } else {
+        out += c;
+        in_space = false;
+      }
+    }
+    return out;
   }
 
   static bool IsTagChar(char c) {
@@ -524,11 +550,15 @@ class Renderer {
     if (text.empty()) {
       return;
     }
-    if (IsInlineCapable(Top().kind)) {
-      EmitInline(text);
+    const std::string collapsed = CollapseHtmlSpace(text);
+    if (collapsed.empty()) {
       return;
     }
-    if (IsAllSpace(text)) {
+    if (IsInlineCapable(Top().kind)) {
+      EmitInline(collapsed);
+      return;
+    }
+    if (IsAllSpace(collapsed)) {
       return;  // indentation/newlines between block tags.
     }
     const size_t before = frames_.size();
@@ -536,7 +566,7 @@ class Renderer {
     if (frames_.size() == before) {
       return;  // unexpected frame; drop rather than corrupt the stack.
     }
-    EmitInline(text);
+    EmitInline(collapsed);
   }
 
   // A <br> break: end the current row, forcing a blank row when the

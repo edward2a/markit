@@ -420,6 +420,35 @@ TEST(Markdown, HtmlAnchorInParagraphRendersLink) {
       << "surrounding text stays plain";
 }
 
+// Regression (FTXUI README link row): newlines/indentation between HTML
+// anchors must collapse to single spaces. Raw "\n" in a text() element made
+// hflow break the row, stranding styled (underlined/hyperlink) spaces on the
+// next visual row: an empty-looking line below the links showing underlines
+// with the same link URLs.
+TEST(Markdown, HtmlLinksAcrossLinesLeaveNoPhantomUnderline) {
+  const std::string md =
+      "<div>\n"
+      "<a href=\"https://a.test/1\">Documentation</a> \u00b7\n"
+      "<a href=\"https://b.test/2\">Report a Bug</a> \u00b7\n"
+      "<a href=\"https://c.test/3\">Examples</a>\n"
+      "</div>\n";
+  ftxui::Screen screen(80, 6);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  std::string row0;
+  for (int c = 0; c < 80; ++c) {
+    row0 += screen.CellAt(c, 0).character;
+  }
+  EXPECT_NE(row0.find("Documentation"), std::string::npos);
+  EXPECT_NE(row0.find("Report a Bug"), std::string::npos);
+  EXPECT_NE(row0.find("Examples"), std::string::npos);
+  for (int r = 1; r < 6; ++r) {
+    for (int c = 0; c < 80; ++c) {
+      EXPECT_FALSE(screen.CellAt(c, r).underlined)
+          << "phantom underline at row " << r << " col " << c;
+    }
+  }
+}
+
 // <details>/<summary> render statically and always expanded: the summary
 // gets a disclosure marker, content flows as normal blocks, nothing boxed.
 TEST(Markdown, HtmlDetailsRendersExpanded) {
