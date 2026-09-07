@@ -14,6 +14,8 @@
 #include <ftxui/util/ref.hpp>             // for Ref
 
 #include "scroller.hpp"
+#include "config.hpp"
+#include "markdown.hpp"
 
 namespace {
 
@@ -29,6 +31,15 @@ ftxui::Component MakeLines(int n) {
     }
     return ftxui::vbox(std::move(elements));
   });
+}
+
+// Wrap a child in a Scroller exercising the wrap-mode path with a real
+// viewport width (kWidth), matching how the app drives it.
+ftxui::Component WrapScroller(ftxui::Component child, int* selected,
+                              int* viewport,
+                              std::function<void(int, int)> on_change = {}) {
+  return ftxui::Scroller(std::move(child), selected, viewport,
+                         std::move(on_change), 0, kWidth, false);
 }
 
 // Render one frame so the component learns its content height / viewport.
@@ -56,6 +67,35 @@ std::string TopRow(ftxui::Component& scroller) {
   return row;
 }
 
+// Render the scroller's current output and count non-blank trimmed rows.
+int VisibleRows(ftxui::Component& scroller) {
+  ftxui::Screen screen(kWidth, kHeight);
+  ftxui::Render(screen, scroller->Render());
+  std::string out = screen.ToString();
+  int rows = 0;
+  std::string row;
+  for (char c : out) {
+    if (c == '\n' || c == '\r') {
+      while (!row.empty() && row.back() == ' ') {
+        row.pop_back();
+      }
+      if (!row.empty()) {
+        ++rows;
+      }
+      row.clear();
+    } else {
+      row += c;
+    }
+  }
+  while (!row.empty() && row.back() == ' ') {
+    row.pop_back();
+  }
+  if (!row.empty()) {
+    ++rows;
+  }
+  return rows;
+}
+
 // Extract the integer from a "line-N" row.
 int LineNumber(const std::string& row) {
   auto pos = row.find("line-");
@@ -69,7 +109,7 @@ TEST(Scroller, DownAdvancesOnePerPress) {
   int n = 60;
   int selected = 0;
   int viewport = kHeight;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
+  auto scroller = WrapScroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   for (int i = 1; i <= 40; ++i) {
@@ -82,7 +122,7 @@ TEST(Scroller, DownAdvancesOnePerPress) {
 TEST(Scroller, UpMovesOneAndClampsAtTop) {
   int selected = 5;
   int viewport = kHeight;
-  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport);
+  auto scroller = WrapScroller(MakeLines(60), &selected, &viewport);
   Prime(scroller);
 
   ASSERT_TRUE(scroller->OnEvent(ftxui::Event::k));
@@ -101,7 +141,7 @@ TEST(Scroller, ViewScrollsOneLinePerPress) {
   int n = 60;
   int selected = 0;
   int viewport = kHeight;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
+  auto scroller = WrapScroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   // First press already scrolls: line-0 becomes line-1.
@@ -122,7 +162,7 @@ TEST(Scroller, PageScrollsByViewportHeight) {
   int n = 60;
   int selected = 0;
   int viewport = kHeight;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
+  auto scroller = WrapScroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   ASSERT_TRUE(scroller->OnEvent(ftxui::Event::PageDown));
@@ -139,7 +179,7 @@ TEST(Scroller, HomeEnd) {
   int n = 60;
   int selected = 30;
   int viewport = kHeight;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
+  auto scroller = WrapScroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Home));
@@ -158,9 +198,10 @@ TEST(Scroller, OnChangeCallback) {
   int selected = 0;
   int viewport = kHeight;
   std::vector<std::pair<int, int>> calls;
-  auto scroller = ftxui::Scroller(
-      MakeLines(60), &selected, &viewport,
-      [&](int before, int after) { calls.emplace_back(before, after); });
+  auto scroller = WrapScroller(MakeLines(60), &selected, &viewport,
+                               [&](int before, int after) {
+                                 calls.emplace_back(before, after);
+                               });
   Prime(scroller);
 
   scroller->OnEvent(ftxui::Event::j);
@@ -177,7 +218,7 @@ TEST(Scroller, NoScrollWhenContentFitsViewport) {
   int n = 4;  // fewer lines than the 8-row viewport
   int selected = 0;
   int viewport = kHeight;
-  auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport);
+  auto scroller = WrapScroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::j));
@@ -194,11 +235,211 @@ TEST(Scroller, NoScrollWhenContentFitsViewport) {
 TEST(Scroller, EventBeforeFirstRenderIsIgnored) {
   int selected = 0;
   int viewport = kHeight;
-  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport);
+  auto scroller = WrapScroller(MakeLines(60), &selected, &viewport);
 
   // No Prime() call: the component has not measured content yet.
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::j));
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::PageDown));
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::End));
   EXPECT_EQ(selected, 0);
+}
+
+namespace {
+
+// A component that renders lines wider than the viewport (60 columns vs a
+// 20-column screen), tall enough that vertical scrolling is active.
+ftxui::Component MakeWideContent() {
+  return ftxui::Renderer([] {
+    std::vector<ftxui::Element> elements;
+    for (int i = 0; i < 12; ++i) {
+      elements.push_back(ftxui::text(std::string(60, 'x')));
+    }
+    elements.push_back(ftxui::text("short"));
+    return ftxui::vbox(std::move(elements));
+  });
+}
+
+}  // namespace
+
+// With horizontal panning enabled, ArrowRight/ArrowLeft (and l/h) move the
+// horizontal offset within [0, content_width - viewport_width].
+TEST(Scroller, HorizontalPanClamps) {
+  int selected = 0;
+  int viewport_height = kHeight;
+  int selected_x = 0;
+  int viewport_width = kWidth;
+  bool hscroll = true;
+  auto scroller = ftxui::Scroller(MakeWideContent(), &selected, &viewport_height,
+                                  {}, &selected_x, &viewport_width, &hscroll);
+  Prime(scroller);
+
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::ArrowRight));
+  EXPECT_EQ(selected_x, 1);
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Character('l')));
+  EXPECT_EQ(selected_x, 2);
+
+  // max_x_offset = 60 - 20 = 40; further presses clamp instead of moving.
+  selected_x = 40;
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::ArrowRight));
+  EXPECT_EQ(selected_x, 40);
+
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::ArrowLeft));
+  EXPECT_EQ(selected_x, 39);
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Character('h')));
+  EXPECT_EQ(selected_x, 38);
+
+  // Vertical navigation is unaffected by horizontal panning.
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::j));
+  EXPECT_EQ(selected, 1);
+}
+
+// When horizontal panning is disabled (wrap mode), the horizontal keys are
+// not consumed and the offset never moves.
+TEST(Scroller, HorizontalKeysInactiveInWrapMode) {
+  int selected = 0;
+  int viewport_height = kHeight;
+  int selected_x = 0;
+  int viewport_width = kWidth;
+  bool hscroll = false;
+  auto scroller = ftxui::Scroller(MakeWideContent(), &selected, &viewport_height,
+                                  {}, &selected_x, &viewport_width, &hscroll);
+  Prime(scroller);
+
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::ArrowRight));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::ArrowLeft));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::Character('l')));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::Character('h')));
+  EXPECT_EQ(selected_x, 0);
+  EXPECT_EQ(selected, 0);
+}
+
+// In wrap mode with a real viewport width, long code/HTML lines must reflow
+// (the content keeps width-constrained layout instead of being laid out at
+// its natural width and clipped). A single long line inside a bordered box
+// renders as several rows.
+TEST(Scroller, WrapModeReflowsLongCodeLines) {
+  const char* md =
+      "```\nsome very long code line with many words beyond the narrow "
+      "viewport width that must wrap\n```\n";
+  int selected = 0;
+  int viewport_height = kHeight;
+  int selected_x = 0;
+  int viewport_width = kWidth;
+  bool hscroll = false;
+  markit::Config cfg;
+  auto scroller = ftxui::Scroller(
+      ftxui::Renderer(
+          [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+  Prime(scroller);
+  EXPECT_GT(VisibleRows(scroller), 3);
+}
+
+// A wrap -> scroll -> wrap round-trip at the same viewport width (mirroring
+// the app's `w` toggle, which also re-renders the content tree per mode)
+// keeps valid scroll bounds: the wrapped height matches the wrap tree.
+TEST(Scroller, WrapSurvivesModeToggleAtSameWidth) {
+  const char* md =
+      "```\nsome very long code line with many words beyond the narrow "
+      "viewport width that must wrap\n"
+      "a second long code line with many words beyond the narrow viewport\n"
+      "a third long code line with many words beyond the narrow viewport\n"
+      "```\n";
+  int selected = 0;
+  int viewport_height = kHeight;
+  int selected_x = 0;
+  int viewport_width = kWidth;
+  bool hscroll = false;
+  markit::Config cfg;
+  auto scroller = ftxui::Scroller(
+      ftxui::Renderer(
+          [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+  Prime(scroller);
+  const int wrap_rows = VisibleRows(scroller);
+  ASSERT_GT(wrap_rows, 3);
+
+  hscroll = true;  // scroll mode: single wide rows.
+  cfg.horizontal_wrap = markit::WrapMode::Scroll;
+  Prime(scroller);
+
+  hscroll = false;  // back to wrap at the same width.
+  cfg.horizontal_wrap = markit::WrapMode::Wrap;
+  Prime(scroller);
+  EXPECT_EQ(VisibleRows(scroller), wrap_rows);
+
+  // Navigation still clamps to the re-measured content.
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::End));
+  EXPECT_GE(selected, 0);
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::Home));
+  EXPECT_EQ(selected, 0);
+}
+
+// In scroll mode the code box spans the full content width instead of
+// hugging its own widest line: with a 100-column paragraph above a narrow
+// block at a 60-column viewport, the border runs past the viewport edge
+// (no closing corner visible) and pans with the content.
+TEST(Scroller, ScrollCodeBoxSpansContentWidth) {
+  const std::string md = std::string(100, 'p') + "\n```\nhi\n```\n";
+  int selected = 0;
+  int viewport_height = kHeight;
+  int selected_x = 0;
+  int viewport_width = 60;
+  bool hscroll = true;
+  markit::Config cfg;
+  cfg.horizontal_wrap = markit::WrapMode::Scroll;
+  auto scroller = ftxui::Scroller(
+      ftxui::Renderer(
+          [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+  ftxui::Screen screen(60, kHeight);
+  ftxui::Render(screen, scroller->Render());
+  int border_row = -1;
+  for (int r = 0; r < kHeight; ++r) {
+    if (screen.CellAt(0, r).character == "┌") {
+      border_row = r;
+      break;
+    }
+  }
+  ASSERT_GE(border_row, 0) << "code box border must render";
+  for (int c = 0; c < 60; ++c) {
+    EXPECT_NE(screen.CellAt(c, border_row).character, "┐")
+        << "border must not close inside the viewport";
+  }
+  // Column 59 is the vscroll_indicator track; the border runs right up to it.
+  EXPECT_EQ(screen.CellAt(58, border_row).character, "─");
+}
+
+// The scroller tracks the viewport-width ref across renders: narrowing the
+// viewport reflows wrapped content (the last word leaves the first row) and
+// widening again restores the earlier layout.
+TEST(Scroller, WrapAdaptsToViewportWidthChange) {
+  const char* md =
+      "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu\n";
+  int selected = 0;
+  int viewport_height = 72;
+  int selected_x = 0;
+  int viewport_width = 72;
+  bool hscroll = false;
+  markit::Config cfg;
+  auto scroller = ftxui::Scroller(
+      ftxui::Renderer(
+          [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+  auto first_row = [&](int w) {
+    viewport_width = w;
+    ftxui::Screen screen(w, 72);
+    ftxui::Render(screen, scroller->Render());
+    std::string row;
+    for (int c = 0; c < w; ++c) {
+      row += screen.CellAt(c, 0).character;
+    }
+    return row;
+  };
+  EXPECT_NE(first_row(72).find("mu"), std::string::npos)
+      << "66-column paragraph fits on the first row at width 72";
+  EXPECT_EQ(first_row(20).find("mu"), std::string::npos)
+      << "narrowing the viewport wraps the last word off the first row";
+  EXPECT_NE(first_row(72).find("mu"), std::string::npos)
+      << "widening again restores the single-row layout";
 }

@@ -14,38 +14,122 @@
 #include <ftxui/dom/elements.hpp>  // for operator|, Element, focusPositionRelative, yframe, vscroll_indicator, yflex
 #include <ftxui/dom/node.hpp>      // for Node
 #include <ftxui/dom/requirement.hpp>  // for Requirement
+#include <ftxui/screen/screen.hpp>    // for Screen, Dimension
 
 namespace ftxui {
 
 namespace {
 
+// Renders a width-constrained element into a tall screen and returns the last
+// row index with visible content (querying the full width, so trailing
+// padding doesn't count). Used in wrap mode where the wrapped height is only
+// known after a constrained layout. `seed_cap` is a lower bound for the
+// height (the unwrapped requirement): starting there avoids re-rendering
+// through several growth steps for long documents.
+int MeasureWrapHeight(const Element& element, int viewport_width,
+                      int seed_cap) {
+  int cap = std::clamp(seed_cap, 256, 65536);
+  for (;;) {
+    Screen screen = Screen::Create(Dimension::Fixed(viewport_width),
+                                   Dimension::Fixed(cap));
+    Render(screen, element);
+    int last = -1;
+    for (int row = 0; row < cap; ++row) {
+      for (int col = 0; col < viewport_width; ++col) {
+        const Cell& cell = screen.CellAt(col, row);
+        if ((cell.character != " " && cell.character != "") ||
+            cell.background_color != Color::Default) {
+          last = row;
+          break;
+        }
+      }
+    }
+    if (last < cap - 1 || cap >= 65536) {
+      return last + 1;
+    }
+    cap *= 4;
+  }
+}
+
 class ScrollerBase : public ComponentBase {
  public:
   ScrollerBase(Component child, Ref<int> selected, Ref<int> viewport_height,
-               std::function<void(int, int)> on_change)
+               std::function<void(int, int)> on_change, Ref<int> selected_x,
+               Ref<int> viewport_width, Ref<bool> horizontal_scroll)
       : selected_(std::move(selected)),
         viewport_height_(std::move(viewport_height)),
-        on_change_(std::move(on_change)) {
+        on_change_(std::move(on_change)),
+        selected_x_(std::move(selected_x)),
+        viewport_width_(std::move(viewport_width)),
+        horizontal_scroll_(std::move(horizontal_scroll)) {
     Add(child);
   }
 
  private:
   Element OnRender() final {
     Element background = ComponentBase::Render();
-    background->ComputeRequirement();
-    content_height_ = std::max(1, background->requirement().min_y);
+    // The child tree is often pointer-identical across frames (a pure
+    // content renderer returns its cached tree), and its requirement is
+    // then stable too, so skip the redundant walk. The shared_ptr is
+    // retained to keep the identity key alive: a bare raw pointer could be
+    // recycled by a newly built tree and cause a false cache hit.
+    if (background.get() != rendered_tree_.get()) {
+      background->ComputeRequirement();
+      rendered_tree_ = background;
+      natural_height_ = std::max(1, background->requirement().min_y);
+      natural_width_ = std::max(1, background->requirement().min_x);
+    }
+    int natural_height = natural_height_;
+    int natural_width = natural_width_;
     int viewport_height = std::max(1, *viewport_height_);
     *viewport_height_ = viewport_height;
+    int viewport_width = std::max(1, *viewport_width_);
+    *viewport_width_ = viewport_width;
 
     // Invert the frame's centering so the top visible line equals `selected`.
     // The frame computes dy = content*y - viewport/2; we want dy = selected,
-    // hence y = (selected + viewport/2 - 1) / content. The -1 accounts for the
-    // frame's exclusive box bounds. Clamp y to keep the frame within bounds.
+    // hence y = (selected + viewport/2 - 1) / content. The -1 is for the
+    // frame's exclusive box bounds. This is re-clamped in wrap mode after the
+    // wrapped height is measured.
     float y = static_cast<float>(*selected_) + viewport_height / 2.f - 1.f;
-    y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
 
+    // Scroll mode: content keeps its natural (full) width so it can be
+    // panned. The wrap measurement below is mode-specific (the content tree
+    // differs per mode), so invalidate it when leaving wrap mode.
+    if (*horizontal_scroll_) {
+      wrap_measured_ = false;
+      content_height_ = natural_height;
+      content_width_ = natural_width;
+      y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
+      float x = 0.f;
+      if (content_width_ > viewport_width) {
+        x = static_cast<float>(*selected_x_) + viewport_width / 2.f - 1.f;
+        x = std::clamp(x / static_cast<float>(content_width_), 0.f, 1.f);
+      }
+      return std::move(background) | focusPositionRelative(x, y) | xframe |
+             yframe | vscroll_indicator | yflex;
+    }
+
+    // Wrap mode. A frame (xframe) would lay the content out at its natural
+    // width and then clip it, which defeats reflow; without it the content
+    // fills the viewport width and hflow wraps there. Measure the wrapped
+    // height once per viewport width for the vertical scroll math.
+    if (!wrap_measured_ || measured_wrap_width_ != viewport_width) {
+      measured_wrap_width_ = viewport_width;
+      wrap_measured_ = true;
+      // Wrapped rows >= unwrapped rows, so the natural height is a safe
+      // lower bound for the measurement cap.
+      measured_wrap_height_ = std::max(
+          1, MeasureWrapHeight(background, viewport_width, natural_height));
+    }
+    // Every render passes through here (not only measuring ones): restore
+    // the cached height, otherwise the natural height assigned above would
+    // silently shrink the scroll range back to the unwrapped size.
+    content_height_ = measured_wrap_height_;
+    content_width_ = viewport_width;
+    y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
     return std::move(background) | focusPositionRelative(0.f, y) | yframe |
-           vscroll_indicator | yflex;
+           yflex;
   }
 
   bool OnEvent(Event event) final {
@@ -57,6 +141,7 @@ class ScrollerBase : public ComponentBase {
     int max_offset = std::max(0, content_height_ - viewport_height);
 
     int after = before;
+    bool handled = true;
     if (event == Event::ArrowUp || event == Event::Character('k')) {
       after = before - 1;
     } else if (event == Event::ArrowDown || event == Event::Character('j')) {
@@ -69,6 +154,24 @@ class ScrollerBase : public ComponentBase {
       after = 0;
     } else if (event == Event::End) {
       after = max_offset;
+    } else if (*horizontal_scroll_ &&
+               (event == Event::ArrowLeft || event == Event::Character('h'))) {
+      int after_x = std::max(0, *selected_x_ - 1);
+      if (after_x == *selected_x_) {
+        return false;
+      }
+      *selected_x_ = after_x;
+      return true;
+    } else if (*horizontal_scroll_ &&
+               (event == Event::ArrowRight || event == Event::Character('l'))) {
+      int viewport_width = std::max(1, *viewport_width_);
+      int max_x_offset = std::max(0, content_width_ - viewport_width);
+      int after_x = std::min(*selected_x_ + 1, max_x_offset);
+      if (after_x == *selected_x_) {
+        return false;
+      }
+      *selected_x_ = after_x;
+      return true;
     } else {
       return false;
     }
@@ -94,15 +197,28 @@ class ScrollerBase : public ComponentBase {
   Ref<int> selected_;
   Ref<int> viewport_height_;
   std::function<void(int, int)> on_change_;
-  int content_height_ = -1;
+  Ref<int> selected_x_;
+  Ref<int> viewport_width_;
+  Ref<bool> horizontal_scroll_;
+   int content_height_ = -1;
+   int content_width_ = -1;
+   int measured_wrap_width_ = -1;
+   int measured_wrap_height_ = 1;
+   bool wrap_measured_ = false;
+   Element rendered_tree_;
+   int natural_height_ = 1;
+   int natural_width_ = 1;
 };
 
 }  // namespace
 
 Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
-                   std::function<void(int, int)> on_change) {
+                   std::function<void(int, int)> on_change, Ref<int> selected_x,
+                   Ref<int> viewport_width, Ref<bool> horizontal_scroll) {
   return Make<ScrollerBase>(std::move(child), std::move(selected),
-                            std::move(viewport_height), std::move(on_change));
+                            std::move(viewport_height), std::move(on_change),
+                            std::move(selected_x), std::move(viewport_width),
+                            std::move(horizontal_scroll));
 }
 
 }  // namespace ftxui

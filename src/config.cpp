@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <yaml-cpp/yaml.h>
 
@@ -65,7 +66,7 @@ std::string Lowercase(std::string s) {
   return s;
 }
 
-bool LookupColor(const std::string& key, const YAML::Node& value,
+void LookupColor(const std::string& key, const YAML::Node& value,
                  ftxui::Color& out, const std::string& prefix) {
   const std::string path = prefix + "." + key;
   if (!value.IsScalar()) {
@@ -79,22 +80,20 @@ bool LookupColor(const std::string& key, const YAML::Node& value,
                              "' (expected a named color or #rrggbb/#rgb)");
   }
   out = *parsed;
-  return true;
 }
 
 // Validate `theme` mapping against the embedded schema, filling `theme` with
 // the colors found (unset fields keep their defaults). Any unknown key, wrong
 // type, or unparseable color throws std::runtime_error with a dotted path.
 void ValidateTheme(const YAML::Node& theme, Theme& out) {
-  static const std::unordered_map<std::string, bool> kKnownTopLevel = {
-      {"heading", true}, {"link", true},   {"inline_code", true},
-      {"code_block", true}, {"quote_marker", true},
+  static const std::unordered_set<std::string> kKnownTopLevel = {
+      "heading", "link", "inline_code", "code_block", "quote_marker",
   };
-  static const std::unordered_map<std::string, bool> kKnownHeading = {
-      {"h1", true}, {"h2", true}, {"h3", true}, {"h4", true},
+  static const std::unordered_set<std::string> kKnownHeading = {
+      "h1", "h2", "h3", "h4",
   };
-  static const std::unordered_map<std::string, bool> kKnownPair = {
-      {"fg", true}, {"bg", true},
+  static const std::unordered_set<std::string> kKnownPair = {
+      "fg", "bg",
   };
 
   if (!theme.IsMap()) {
@@ -103,6 +102,9 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
   }
 
   for (auto it = theme.begin(); it != theme.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      throw std::runtime_error("config: theme: expected string keys");
+    }
     const std::string key = it->first.Scalar();
     const YAML::Node value = it->second;
 
@@ -112,6 +114,10 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
             "config: theme.heading: expected a mapping {h1..h4}");
       }
       for (auto h = value.begin(); h != value.end(); ++h) {
+        if (!h->first.IsScalar()) {
+          throw std::runtime_error(
+              "config: theme.heading: expected string keys");
+        }
         const std::string hk = h->first.Scalar();
         if (kKnownHeading.count(hk) == 0) {
           throw std::runtime_error("config: theme.heading." + hk +
@@ -133,6 +139,10 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
                                  ": expected a mapping {fg, bg}");
       }
       for (auto p = value.begin(); p != value.end(); ++p) {
+        if (!p->first.IsScalar()) {
+          throw std::runtime_error("config: theme." + key +
+                                   ": expected string keys");
+        }
         const std::string pk = p->first.Scalar();
         if (kKnownPair.count(pk) == 0) {
           throw std::runtime_error("config: theme." + key + "." + pk +
@@ -158,6 +168,48 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
       LookupColor(key, value, out.quote_marker, "theme");
     } else if (kKnownTopLevel.count(key) == 0) {
       throw std::runtime_error("config: theme." + key + ": unknown key");
+    }
+  }
+}
+
+// Validate the top-level `display` mapping against the embedded schema,
+// filling `cfg` with the values found (unset fields keep their defaults). Any
+// unknown key or unparseable value throws std::runtime_error with a dotted
+// path, matching the theme validation style.
+void ValidateDisplay(const YAML::Node& display, Config& cfg) {
+  static const std::unordered_set<std::string> kKnown = {
+      "horizontal",
+  };
+
+  if (!display.IsMap()) {
+    throw std::runtime_error(
+        "config: display: expected a mapping of display settings");
+  }
+
+  for (auto it = display.begin(); it != display.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      throw std::runtime_error("config: display: expected string keys");
+    }
+    const std::string key = it->first.Scalar();
+    const YAML::Node value = it->second;
+
+    if (key == "horizontal") {
+      if (!value.IsScalar()) {
+        throw std::runtime_error(
+            "config: display.horizontal: expected a string (wrap or scroll)");
+      }
+      const std::string mode = Lowercase(value.Scalar());
+      if (mode == "wrap") {
+        cfg.horizontal_wrap = WrapMode::Wrap;
+      } else if (mode == "scroll") {
+        cfg.horizontal_wrap = WrapMode::Scroll;
+      } else {
+        throw std::runtime_error(
+            "config: display.horizontal: invalid value '" + value.Scalar() +
+            "' (expected 'wrap' or 'scroll')");
+      }
+    } else if (kKnown.count(key) == 0) {
+      throw std::runtime_error("config: display." + key + ": unknown key");
     }
   }
 }
@@ -200,23 +252,46 @@ std::string DefaultConfigPath() {
   return std::string(home) + "/.config/markit/markit.yml";
 }
 
-Theme LoadConfig(const std::string& path) {
-  Theme theme;
+Config LoadConfig(const std::string& path) {
+  Config cfg;
 
   if (path.empty()) {
-    return theme;
+    return cfg;
   }
   std::ifstream exists(path);
   if (!exists.is_open()) {
-    return theme;  // missing config: silently use defaults
+    return cfg;  // missing config: silently use defaults
   }
   exists.close();
 
   YAML::Node root = YAML::LoadFile(path);
-  if (root["theme"].IsDefined()) {
-    ValidateTheme(root["theme"], theme);
+
+  if (!root.IsDefined() || root.IsNull()) {
+    return cfg;  // empty config file: silently use defaults.
   }
-  return theme;
+  if (!root.IsMap()) {
+    throw std::runtime_error(
+        "config: expected a mapping at the top level");
+  }
+
+  // Validate top-level keys (strict, matching the theme-style schema).
+  for (auto it = root.begin(); it != root.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      throw std::runtime_error("config: expected string keys at top level");
+    }
+    const std::string key = it->first.Scalar();
+    if (key != "theme" && key != "display") {
+      throw std::runtime_error("config: " + key + ": unknown top-level key");
+    }
+  }
+
+  if (root["theme"].IsDefined()) {
+    ValidateTheme(root["theme"], cfg.theme);
+  }
+  if (root["display"].IsDefined()) {
+    ValidateDisplay(root["display"], cfg);
+  }
+  return cfg;
 }
 
 // Map a named Color back to its canonical lowercase name, used when emitting
@@ -232,7 +307,7 @@ std::string ColorName(ftxui::Color color) {
 }
 
 void DumpDefaultConfig(std::ostream& out) {
-  out << "# markit color scheme configuration\n"
+  out << "# markit configuration\n"
       << "#\n"
       << "# Every color value may be either:\n"
       << "#   - a named palette color (case-insensitive):\n"
@@ -259,7 +334,12 @@ void DumpDefaultConfig(std::ostream& out) {
       << "  code_block:     # fenced ``` code blocks\n"
       << "    fg: " << ColorName(Theme{}.code_block_fg) << "\n"
       << "    bg: " << ColorName(Theme{}.code_block_bg) << "\n"
-      << "  quote_marker: " << ColorName(Theme{}.quote_marker) << "\n";
+      << "  quote_marker: " << ColorName(Theme{}.quote_marker) << "\n"
+      << "display:\n"
+      << "  horizontal: " << (Config{}.horizontal_wrap == WrapMode::Scroll
+                                  ? "scroll"
+                                  : "wrap")
+      << "\n";
 }
 
 }  // namespace markit

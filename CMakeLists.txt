@@ -36,20 +36,30 @@ FetchContent_Declare(yaml-cpp
 )
 FetchContent_MakeAvailable(yaml-cpp)
 
-add_executable(markit
-  src/main.cpp
+# Shared core: compiled once and linked by both the app and the tests.
+add_library(markit_core STATIC
   src/scroller.cpp
   src/markdown.cpp
   src/config.cpp
 )
-target_link_libraries(markit
-  PRIVATE ftxui::component
-  PRIVATE ftxui::dom
-  PRIVATE ftxui::screen
-  PRIVATE md4c
-  PRIVATE yaml-cpp
+target_include_directories(markit_core
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
+  PRIVATE ${md4c_SOURCE_DIR}/src
 )
-target_include_directories(markit PRIVATE ${md4c_SOURCE_DIR}/src)
+target_link_libraries(markit_core
+  PUBLIC ftxui::component
+  PUBLIC ftxui::dom
+  PUBLIC ftxui::screen
+  PUBLIC md4c
+  PUBLIC yaml-cpp
+)
+
+add_executable(markit
+  src/main.cpp
+)
+target_link_libraries(markit
+  PRIVATE markit_core
+)
 
 option(MARKIT_BUILD_TESTS "Build markit tests" ON)
 if (MARKIT_BUILD_TESTS)
@@ -60,22 +70,13 @@ if (MARKIT_BUILD_TESTS)
 
     add_executable(markit-tests
       src/scroller_test.cpp
-      src/scroller.cpp
       src/markdown_test.cpp
-      src/markdown.cpp
       src/config_test.cpp
-      src/config.cpp
     )
-    target_include_directories(markit-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(markit-tests
-      PRIVATE ftxui::component
-      PRIVATE ftxui::dom
-      PRIVATE ftxui::screen
+      PRIVATE markit_core
       PRIVATE GTest::gtest_main
-      PRIVATE md4c
-      PRIVATE yaml-cpp
     )
-    target_include_directories(markit-tests PRIVATE ${md4c_SOURCE_DIR}/src)
     add_test(NAME markit-tests COMMAND markit-tests)
   else()
     message(STATUS "markit: tests require BUILD_SHARED_LIBS=OFF; skipped")

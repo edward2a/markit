@@ -64,8 +64,9 @@ TEST(Config, ParseColor_Invalid) {
 }
 
 TEST(Config, LoadConfig_MissingFileReturnsDefaults) {
-  const markit::Theme t =
+  const markit::Config cfg =
       markit::LoadConfig("/nonexistent/markit-missing.yml");
+  const markit::Theme& t = cfg.theme;
   EXPECT_EQ(t.heading_h1, ftxui::Color::Red);
   EXPECT_EQ(t.link, ftxui::Color::CyanLight);
   EXPECT_EQ(t.inline_code_fg, ftxui::Color::Green);
@@ -76,8 +77,57 @@ TEST(Config, LoadConfig_MissingFileReturnsDefaults) {
 }
 
 TEST(Config, LoadConfig_EmptyPathReturnsDefaults) {
-  const markit::Theme t = markit::LoadConfig("");
-  EXPECT_EQ(t.heading_h1, ftxui::Color::Red);
+  const markit::Config cfg = markit::LoadConfig("");
+  EXPECT_EQ(cfg.theme.heading_h1, ftxui::Color::Red);
+}
+
+// A default-constructed Config mirrors the built-in theme: load/dump operate
+// on the whole config container, not just the color scheme.
+TEST(Config, Config_WrapsTheme) {
+  const markit::Config defaults;
+  EXPECT_EQ(defaults.theme.heading_h1, ftxui::Color::Red);
+  EXPECT_EQ(defaults.theme.inline_code_bg, ftxui::Color::GrayDark);
+  EXPECT_EQ(defaults.theme.quote_marker, ftxui::Color::GrayDark);
+}
+
+// The default display mode is Wrap (user decision Q1) and survives load.
+TEST(Config, LoadConfig_DefaultWrapMode) {
+  EXPECT_EQ(markit::LoadConfig("").horizontal_wrap, markit::WrapMode::Wrap);
+  const markit::Config cfg = markit::LoadConfig("/nonexistent/markit-missing.yml");
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);
+}
+
+TEST(Config, LoadConfig_DisplayScrollExplicit) {
+  const std::string path = TempYaml("display:\n  horizontal: scroll\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Scroll);
+  EXPECT_EQ(cfg.theme.heading_h1, ftxui::Color::Red);  // theme untouched
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_DisplayWrapExplicit) {
+  const std::string path = TempYaml("display:\n  horizontal: wrap\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_DisplayInvalidValueThrows) {
+  const std::string path = TempYaml("display:\n  horizontal: sideways\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_DisplayUnknownKeyThrows) {
+  const std::string path = TempYaml("display:\n  vertical: wrap\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_UnknownTopLevelSectionThrows) {
+  const std::string path = TempYaml("sidebar:\n  width: 30\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
 }
 
 TEST(Config, LoadConfig_PartialOverride) {
@@ -86,7 +136,8 @@ TEST(Config, LoadConfig_PartialOverride) {
       "  link: yellow\n"
       "  heading:\n"
       "    h1: '#ff0000'\n");
-  const markit::Theme t = markit::LoadConfig(path);
+  const markit::Config cfg = markit::LoadConfig(path);
+  const markit::Theme& t = cfg.theme;
   EXPECT_EQ(t.link, ftxui::Color::Yellow);
   EXPECT_EQ(t.heading_h1, ftxui::Color::RGB(0xff, 0x00, 0x00));
   // Unset fields keep defaults.
@@ -105,7 +156,8 @@ TEST(Config, LoadConfig_NamedAndHex) {
       "    fg: '#c0c0c0'\n"
       "    bg: graydark\n"
       "  quote_marker: blue\n");
-  const markit::Theme t = markit::LoadConfig(path);
+  const markit::Config cfg = markit::LoadConfig(path);
+  const markit::Theme& t = cfg.theme;
   EXPECT_EQ(t.inline_code_fg, ftxui::Color::Green);
   EXPECT_EQ(t.inline_code_bg, ftxui::Color::RGB(0x20, 0x20, 0x20));
   EXPECT_EQ(t.code_block_fg, ftxui::Color::RGB(0xc0, 0xc0, 0xc0));
@@ -195,6 +247,42 @@ TEST(Config, DumpDefaultConfig_RoundTripMatchesDefaults) {
   EXPECT_EQ(dumped.code_block_fg, defaults.code_block_fg);
   EXPECT_EQ(dumped.code_block_bg, defaults.code_block_bg);
   EXPECT_EQ(dumped.quote_marker, defaults.quote_marker);
+
+  // The display section round-trips: the dumped document reloads to the
+  // default Wrap mode.
+  const std::string h = root["display"]["horizontal"].Scalar();
+  const std::string path = TempYaml(h == "wrap" ? "display:\n  horizontal: wrap\n"
+                                                 : "display:\n  horizontal: scroll\n");
+  EXPECT_EQ(markit::LoadConfig(path).horizontal_wrap, markit::Config{}.horizontal_wrap);
+  std::remove(path.c_str());
+}
+
+// An empty config file yields defaults instead of a yaml-cpp exception.
+TEST(Config, LoadConfig_EmptyFileReturnsDefaults) {
+  const std::string path = TempYaml("");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.theme.heading_h1, ftxui::Color::Red);
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);
+  std::remove(path.c_str());
+}
+
+// A defined-but-not-a-mapping root is a typed error, not an untyped
+// yaml-cpp exception.
+TEST(Config, LoadConfig_NonMapRootThrows) {
+  const std::string path = TempYaml("- just\n- a\n- list\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+// Non-scalar mapping keys are rejected with a typed error at every level.
+TEST(Config, LoadConfig_NonScalarKeyThrows) {
+  const std::string top = TempYaml("? [a, b]\n: 1\n");
+  EXPECT_THROW(markit::LoadConfig(top), std::runtime_error);
+  std::remove(top.c_str());
+
+  const std::string nested = TempYaml("theme:\n  ? [a]\n  : red\n");
+  EXPECT_THROW(markit::LoadConfig(nested), std::runtime_error);
+  std::remove(nested.c_str());
 }
 
 }  // namespace
