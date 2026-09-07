@@ -64,3 +64,5 @@ Change tag:
 
 - 2026-09-07T11:42:18Z - add - Milestone 5 static chrome: status bar (basename + scroll position + wrap/scroll mode, inverted), action bar (key hints, dim), and full-height right navigation bar (TOC from document headings, "Outline" title); nav toggles live with 'n', defaults to display.navigation visible|hidden, content viewport shrinks around the chrome
 - 2026-09-07T13:49:40Z - mod - Collapse HTML inline whitespace to single spaces: newlines/indentation between anchors no longer reach text() elements where hflow broke the row and stranded styled spaces as a phantom underlined line below the links carrying the same URLs
+- 2026-09-07T16:55:05Z - mod - Fix HTML link spacing/underline in both modes: merge whitespace split across md4c callbacks (kills double spaces) and keep cross-fragment gaps plain unless from the same styled run (adjacent same-URL badges no longer get underlined gaps in wrap mode)
+- 2026-09-07T17:31:30Z - mod - Drop link-edge formatting whitespace in HTML anchors: newlines/indentation right after <a> and before </a> no longer render as link-styled padding around lone images (no more surrounding underlines in scroll mode)

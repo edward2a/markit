@@ -449,6 +449,106 @@ TEST(Markdown, HtmlLinksAcrossLinesLeaveNoPhantomUnderline) {
   }
 }
 
+// Regression (FTXUI README link row): md4c splits the whitespace between HTML
+// anchors into several callbacks ("\n" then "  "), which accumulated into
+// double spaces. Separators render once, in both wrap and scroll modes.
+TEST(Markdown, HtmlLinksAcrossLinesCollapseToSingleSpaces) {
+  const std::string md =
+      "<div>\n"
+      "  <a href=\"https://a.test/1\">Documentation</a> \u00b7\n"
+      "  <a href=\"https://b.test/2\">Report a Bug</a>\n"
+      "</div>\n";
+  for (markit::WrapMode mode :
+       {markit::WrapMode::Wrap, markit::WrapMode::Scroll}) {
+    markit::Config cfg;
+    cfg.horizontal_wrap = mode;
+    ftxui::Screen screen(80, 4);
+    ftxui::Render(screen, markit::RenderMarkdown(md, cfg));
+    std::string row0;
+    for (int c = 0; c < 80; ++c) {
+      row0 += screen.CellAt(c, 0).character;
+    }
+    EXPECT_NE(row0.find("Documentation \u00b7 Report a Bug"),
+              std::string::npos)
+        << "single spaces in mode " << static_cast<int>(mode) << ": [" << row0
+        << "]";
+  }
+}
+
+// Regression (FTXUI README badges): the gap between two adjacent links with
+// the same URL (e.g. href="#" badges) must stay plain in wrap mode. WrapRow
+// used to treat cross-fragment whitespace as label-internal whenever the keys
+// matched, underlining the gap.
+TEST(Markdown, HtmlSameUrlLinkGapStaysPlainInWrap) {
+  const std::string md =
+      "<div>\n"
+      "<a href=\"#\"><img alt=\"one\" src=\"x\"></a>\n"
+      "<a href=\"#\"><img alt=\"two\" src=\"y\"></a>\n"
+      "</div>\n";
+  ftxui::Screen screen(40, 4);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  int one_end = -1;
+  int two_start = -1;
+  for (int c = 0; c < 40; ++c) {
+    const std::string ch = screen.CellAt(c, 0).character;
+    if (ch == "e" && one_end < 0) {
+      one_end = c;  // end of "one"
+    }
+    if (ch == "t") {
+      two_start = c;  // start of "two"
+      break;
+    }
+  }
+  ASSERT_GE(one_end, 0);
+  ASSERT_GE(two_start, 0);
+  EXPECT_EQ(two_start, one_end + 2) << "exactly one space between badges";
+  EXPECT_FALSE(screen.CellAt(one_end + 1, 0).underlined)
+      << "gap between same-URL links must stay plain";
+}
+
+// Regression (FTXUI README codecov badge): newlines/indentation *inside* an
+// anchor around a lone image are source formatting, not link content. They
+// used to render as link-styled padding around the image (visible as
+// surrounding underlines in scroll mode). Both modes show just the image.
+TEST(Markdown, HtmlImageLinkEdgeWhitespaceHasNoSurroundingUnderline) {
+  const std::string md =
+      "<div>\n"
+      "  <a href=\"https://c.test/9\">\n"
+      "    <img src=\"y.png\">\n"
+      "  </a>\n"
+      "</div>\n";
+  for (markit::WrapMode mode :
+       {markit::WrapMode::Wrap, markit::WrapMode::Scroll}) {
+    markit::Config cfg;
+    cfg.horizontal_wrap = mode;
+    ftxui::Screen screen(40, 4);
+    ftxui::Render(screen, markit::RenderMarkdown(md, cfg));
+    int img_col = -1;
+    for (int c = 0; c < 40; ++c) {
+      if (screen.CellAt(c, 0).character == "[") {
+        img_col = c;
+        break;
+      }
+    }
+    ASSERT_GE(img_col, 0) << "image must render in mode "
+                          << static_cast<int>(mode);
+    for (int c = img_col; c < img_col + 5; ++c) {
+      EXPECT_TRUE(screen.CellAt(c, 0).underlined)
+          << "image itself stays underlined in mode " << static_cast<int>(mode)
+          << " col " << c;
+    }
+    if (img_col > 0) {
+      EXPECT_FALSE(screen.CellAt(img_col - 1, 0).underlined)
+          << "no leading underline in mode " << static_cast<int>(mode);
+    }
+    for (int c = img_col + 5; c < 40; ++c) {
+      EXPECT_FALSE(screen.CellAt(c, 0).underlined)
+          << "no trailing underline in mode " << static_cast<int>(mode)
+          << " col " << c;
+    }
+  }
+}
+
 // <details>/<summary> render statically and always expanded: the summary
 // gets a disclosure marker, content flows as normal blocks, nothing boxed.
 TEST(Markdown, HtmlDetailsRendersExpanded) {
