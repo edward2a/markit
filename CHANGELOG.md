@@ -66,3 +66,4 @@ Change tag:
 - 2026-09-07T13:49:40Z - mod - Collapse HTML inline whitespace to single spaces: newlines/indentation between anchors no longer reach text() elements where hflow broke the row and stranded styled spaces as a phantom underlined line below the links carrying the same URLs
 - 2026-09-07T16:55:05Z - mod - Fix HTML link spacing/underline in both modes: merge whitespace split across md4c callbacks (kills double spaces) and keep cross-fragment gaps plain unless from the same styled run (adjacent same-URL badges no longer get underlined gaps in wrap mode)
 - 2026-09-07T17:31:30Z - mod - Drop link-edge formatting whitespace in HTML anchors: newlines/indentation right after <a> and before </a> no longer render as link-styled padding around lone images (no more surrounding underlines in scroll mode)
+- 2026-09-07T19:19:05Z - rem - Drop the scroll-mode vscroll_indicator gutter; the full viewport width is usable again, scroll position stays in the status bar

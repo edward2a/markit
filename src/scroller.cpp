@@ -11,7 +11,7 @@
 
 #include <ftxui/component/component_base.hpp>  // for ComponentBase
 #include <ftxui/component/event.hpp>  // for Event, Event::ArrowDown, Event::ArrowUp, Event::End, Event::Home, Event::PageDown, Event::PageUp
-#include <ftxui/dom/elements.hpp>  // for operator|, Element, focusPositionRelative, yframe, vscroll_indicator, yflex
+#include <ftxui/dom/elements.hpp>  // for operator|, Element, focusPositionRelative, yframe, yflex
 #include <ftxui/dom/node.hpp>      // for Node
 #include <ftxui/dom/requirement.hpp>  // for Requirement
 #include <ftxui/screen/screen.hpp>    // for Screen, Dimension
@@ -110,7 +110,7 @@ class ScrollerBase : public ComponentBase {
       }
       PublishContentHeight();
       return std::move(background) | focusPositionRelative(x, y) | xframe |
-             yframe | vscroll_indicator | yflex;
+             yframe | yflex;
     }
 
     // Wrap mode. A frame (xframe) would lay the content out at its natural

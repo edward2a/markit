@@ -57,11 +57,8 @@ std::string TopRow(ftxui::Component& scroller) {
     nl = out.size();
   }
   std::string row = out.substr(0, nl);
-  // Drop trailing carriage return, padding spaces, and the vscroll_indicator
-  // glyph (a box-drawing character occupying the rightmost column).
-  while (!row.empty() &&
-         (row.back() == ' ' || row.back() == '\r' ||
-          static_cast<unsigned char>(row.back()) >= 0x80)) {
+  // Drop trailing carriage return and padding spaces.
+  while (!row.empty() && (row.back() == ' ' || row.back() == '\r')) {
     row.pop_back();
   }
   return row;
@@ -406,8 +403,9 @@ TEST(Scroller, ScrollCodeBoxSpansContentWidth) {
     EXPECT_NE(screen.CellAt(c, border_row).character, "┐")
         << "border must not close inside the viewport";
   }
-  // Column 59 is the vscroll_indicator track; the border runs right up to it.
-  EXPECT_EQ(screen.CellAt(58, border_row).character, "─");
+  // With no scrollbar gutter the border uses the full viewport width and
+  // runs right up to (and past) the last column.
+  EXPECT_EQ(screen.CellAt(59, border_row).character, "─");
 }
 
 // The scroller tracks the viewport-width ref across renders: narrowing the
