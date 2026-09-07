@@ -368,6 +368,82 @@ TEST(Markdown, HtmlAnchorInParagraphRendersLink) {
       << "surrounding text stays plain";
 }
 
+// <details>/<summary> render statically and always expanded: the summary
+// gets a disclosure marker, content flows as normal blocks, nothing boxed.
+TEST(Markdown, HtmlDetailsRendersExpanded) {
+  const std::string md =
+      "<details>\n<summary>Click me</summary>\nHidden content here.\n</details>\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_EQ(joined.find("<details>"), std::string::npos)
+      << "tags must render, not show literally";
+  EXPECT_EQ(joined.find("┌"), std::string::npos)
+      << "details must not be boxed";
+  EXPECT_NE(joined.find("Click me"), std::string::npos);
+  EXPECT_NE(joined.find("Hidden content here."), std::string::npos);
+  EXPECT_NE(joined.find("▸"), std::string::npos)
+      << "summary needs a disclosure marker";
+  ftxui::Screen screen(40, 10);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  bool summary_bold = false;
+  for (int r = 0; r < 10 && !summary_bold; ++r) {
+    for (int c = 0; c < 40; ++c) {
+      if (screen.CellAt(c, r).character == "C") {
+        summary_bold = screen.CellAt(c, r).bold;
+        break;
+      }
+    }
+  }
+  EXPECT_TRUE(summary_bold) << "summary text must be bold";
+}
+
+// <details open> shows the expanded marker.
+TEST(Markdown, HtmlDetailsOpenMarker) {
+  const std::string md =
+      "<details open>\n<summary>Shown</summary>\nBody.\n</details>\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_NE(joined.find("▾"), std::string::npos)
+      << "open details needs the expanded marker";
+  EXPECT_NE(joined.find("Shown"), std::string::npos);
+  EXPECT_NE(joined.find("Body."), std::string::npos);
+}
+
+// A stray </summary> stays verbatim instead of corrupting the stack.
+TEST(Markdown, HtmlDetailsStrayCloseVerbatim) {
+  const std::string md = "Before.\n\n</summary>\n\nAfter.\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_NE(joined.find("</summary>"), std::string::npos)
+      << "stray close must stay literal";
+  EXPECT_NE(joined.find("Before."), std::string::npos);
+  EXPECT_NE(joined.find("After."), std::string::npos);
+}
+
+// An unclosed <summary> still gets its marker at the block boundary.
+TEST(Markdown, HtmlDetailsUnclosedSummary) {
+  const std::string md =
+      "<details>\n<summary>Unclosed\nContent.\n</details>\n";
+  auto lines = RenderLines(md, {}, 40, 10);
+  std::string joined;
+  for (const auto& l : lines) {
+    joined += l;
+  }
+  EXPECT_NE(joined.find("▸"), std::string::npos)
+      << "unclosed summary still gets a marker";
+  EXPECT_NE(joined.find("Unclosed"), std::string::npos);
+  EXPECT_NE(joined.find("Content."), std::string::npos);
+}
+
 TEST(Markdown, HardBreakLines) {
   auto rows = RenderLines("line one  \nline two with `code`  \nline three\n");
   for (auto& line : rows) {

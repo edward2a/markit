@@ -403,6 +403,10 @@ class Renderer {
   }
 
   void CloseHtmlPara() {
+    if (summary_open_) {
+      CloseHtmlSummary();  // an open <summary> keeps its marker.
+      return;
+    }
     if (Top().kind != Kind::Para) {
       html_align_ = 0;
       return;
@@ -428,6 +432,25 @@ class Renderer {
     Element e = InlineBlocks(top);
     e = ftxui::bold(std::move(e)) | ftxui::color(HeadingColor(top.heading_level));
     Attach(std::move(e), true);
+  }
+
+  // Close a <summary> paragraph: disclosure marker (open-state of the
+  // innermost <details>) + bold, attached like any other block. Called
+  // directly for </summary> and via CloseHtmlPara for any other boundary.
+  void CloseHtmlSummary() {
+    if (!summary_open_ || Top().kind != Kind::Para) {
+      summary_open_ = false;
+      return;
+    }
+    Frame top = Pop();
+    summary_open_ = false;
+    if (top.inline_.empty() && top.rows_.empty()) {
+      return;  // empty <summary></summary>: no row.
+    }
+    const bool open = !details_stack_.empty() && details_stack_.back() == 'o';
+    top.inline_.insert(top.inline_.begin(),
+                       Fragment{open ? "▾ " : "▸ ", Decorator(nullptr), {}});
+    Attach(ftxui::bold(InlineBlocks(top)), true);
   }
 
   // Box the Html frame's verbatim remainder, preserving document order: at
@@ -572,6 +595,19 @@ class Renderer {
       }
     }
     return {};
+  }
+
+  // Attribute presence regardless of value: bare `open`, `open=""` and
+  // `open="open"` all count (e.g. <details open> starts expanded).
+  static bool HasHtmlAttr(
+      const std::vector<std::pair<std::string, std::string>>& attrs,
+      const std::string& name) {
+    for (const auto& [key, value] : attrs) {
+      if (key == name) {
+        return true;
+      }
+    }
+    return false;
   }
 
   static bool IsVoidElement(const std::string& name) {
@@ -870,6 +906,42 @@ class Renderer {
         CloseHtmlPara();
         FlushHtmlText();
         Attach(ftxui::separator(), true);
+      }
+      return;
+    }
+
+    // <details>/<summary> render statically and always expanded (see plan):
+    // the summary gets a disclosure marker, content flows as normal blocks.
+    // Block-level, so inside a markdown paragraph they stay verbatim.
+    if (name == "details" || name == "summary") {
+      if (html_inline_only_) {
+        HtmlVerbatim(raw);
+        return;
+      }
+      if (name == "details") {
+        CloseHtmlPara();
+        FlushHtmlText();
+        if (closing) {
+          if (!details_stack_.empty()) {
+            details_stack_.pop_back();
+          }
+        } else {
+          details_stack_.push_back(HasHtmlAttr(attrs, "open") ? 'o' : 0);
+        }
+        return;
+      }
+      if (closing) {
+        if (summary_open_ && Top().kind == Kind::Para) {
+          CloseHtmlSummary();
+        } else {
+          summary_open_ = false;
+          HtmlVerbatim(raw);  // stray close.
+        }
+      } else {
+        CloseHtmlPara();
+        FlushHtmlText();
+        Push(Frame::Para());
+        summary_open_ = true;
       }
       return;
     }
@@ -1209,6 +1281,8 @@ class Renderer {
           }
           html_open_count_ = 0;
           html_align_ = 0;
+          summary_open_ = false;
+          details_stack_.clear();
         }
         Frame top = Pop();
         if (type == MD_BLOCK_HTML && top.children.empty()) {
@@ -1575,6 +1649,8 @@ class Renderer {
   std::string raw_buf_;     // buffered rawtext content.
   std::string pending_html_;  // verbatim HTML coalesced across blocks.
   char html_align_ = 0;       // 'c' inside <p>/<div align=center>.
+  std::vector<char> details_stack_;  // 'o' per open <details open>.
+  bool summary_open_ = false;  // a <summary> paragraph collects text.
 };
 
 }  // namespace
