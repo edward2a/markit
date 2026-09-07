@@ -26,11 +26,15 @@ namespace ftxui {
 /// @param selected_x Shared horizontal scroll offset (leftmost visible column).
 /// @param viewport_width Shared number of visible columns (terminal width).
 /// @param horizontal_scroll Enables horizontal panning when true.
+/// @param content_height_out Optional out-param receiving the measured content
+///        height (scroll or wrapped) on every render, for chrome such as a
+///        status bar. Null when unneeded; -1 before the first render.
 Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
-                   std::function<void(int before, int after)> on_change = {},
-                   Ref<int> selected_x = Ref<int>(0),
-                   Ref<int> viewport_width = Ref<int>(1),
-                   Ref<bool> horizontal_scroll = Ref<bool>(false));
+                    std::function<void(int before, int after)> on_change = {},
+                    Ref<int> selected_x = Ref<int>(0),
+                    Ref<int> viewport_width = Ref<int>(1),
+                    Ref<bool> horizontal_scroll = Ref<bool>(false),
+                    int* content_height_out = nullptr);
 
 }  // namespace ftxui
 

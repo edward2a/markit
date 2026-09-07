@@ -34,6 +34,8 @@ enum class WrapMode { Wrap, Scroll };
 struct Config {
   Theme theme;
   WrapMode horizontal_wrap = WrapMode::Wrap;
+  // Navigation bar (right side) default visibility; toggled live with `n`.
+  bool nav_visible = true;
 };
 
 // Parse a color string: a named FTXUI Palette16 color (case-insensitive) or a

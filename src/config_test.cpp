@@ -124,6 +124,33 @@ TEST(Config, LoadConfig_DisplayUnknownKeyThrows) {
   std::remove(path.c_str());
 }
 
+// The nav bar is visible by default and survives load.
+TEST(Config, LoadConfig_DefaultNavVisible) {
+  EXPECT_TRUE(markit::LoadConfig("").nav_visible);
+  const markit::Config cfg = markit::LoadConfig("/nonexistent/markit-missing.yml");
+  EXPECT_TRUE(cfg.nav_visible);
+}
+
+TEST(Config, LoadConfig_NavigationHiddenExplicit) {
+  const std::string path = TempYaml("display:\n  navigation: hidden\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_FALSE(cfg.nav_visible);
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);  // mode untouched
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_NavigationVisibleExplicit) {
+  const std::string path = TempYaml("display:\n  navigation: visible\n");
+  EXPECT_TRUE(markit::LoadConfig(path).nav_visible);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_NavigationInvalidValueThrows) {
+  const std::string path = TempYaml("display:\n  navigation: sideways\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
 TEST(Config, LoadConfig_UnknownTopLevelSectionThrows) {
   const std::string path = TempYaml("sidebar:\n  width: 30\n");
   EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
@@ -249,12 +276,17 @@ TEST(Config, DumpDefaultConfig_RoundTripMatchesDefaults) {
   EXPECT_EQ(dumped.quote_marker, defaults.quote_marker);
 
   // The display section round-trips: the dumped document reloads to the
-  // default Wrap mode.
+  // default Wrap mode and a visible nav bar.
   const std::string h = root["display"]["horizontal"].Scalar();
   const std::string path = TempYaml(h == "wrap" ? "display:\n  horizontal: wrap\n"
-                                                 : "display:\n  horizontal: scroll\n");
+                                                  : "display:\n  horizontal: scroll\n");
   EXPECT_EQ(markit::LoadConfig(path).horizontal_wrap, markit::Config{}.horizontal_wrap);
   std::remove(path.c_str());
+
+  const std::string n = root["display"]["navigation"].Scalar();
+  const std::string nav_path = TempYaml("display:\n  navigation: " + n + "\n");
+  EXPECT_EQ(markit::LoadConfig(nav_path).nav_visible, markit::Config{}.nav_visible);
+  std::remove(nav_path.c_str());
 }
 
 // An empty config file yields defaults instead of a yaml-cpp exception.

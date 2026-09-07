@@ -54,14 +54,16 @@ int MeasureWrapHeight(const Element& element, int viewport_width,
 class ScrollerBase : public ComponentBase {
  public:
   ScrollerBase(Component child, Ref<int> selected, Ref<int> viewport_height,
-               std::function<void(int, int)> on_change, Ref<int> selected_x,
-               Ref<int> viewport_width, Ref<bool> horizontal_scroll)
+                std::function<void(int, int)> on_change, Ref<int> selected_x,
+                Ref<int> viewport_width, Ref<bool> horizontal_scroll,
+                int* content_height_out)
       : selected_(std::move(selected)),
         viewport_height_(std::move(viewport_height)),
         on_change_(std::move(on_change)),
         selected_x_(std::move(selected_x)),
         viewport_width_(std::move(viewport_width)),
-        horizontal_scroll_(std::move(horizontal_scroll)) {
+        horizontal_scroll_(std::move(horizontal_scroll)),
+        content_height_out_(content_height_out) {
     Add(child);
   }
 
@@ -106,6 +108,7 @@ class ScrollerBase : public ComponentBase {
         x = static_cast<float>(*selected_x_) + viewport_width / 2.f - 1.f;
         x = std::clamp(x / static_cast<float>(content_width_), 0.f, 1.f);
       }
+      PublishContentHeight();
       return std::move(background) | focusPositionRelative(x, y) | xframe |
              yframe | vscroll_indicator | yflex;
     }
@@ -128,6 +131,7 @@ class ScrollerBase : public ComponentBase {
     content_height_ = measured_wrap_height_;
     content_width_ = viewport_width;
     y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
+    PublishContentHeight();
     return std::move(background) | focusPositionRelative(0.f, y) | yframe |
            yflex;
   }
@@ -192,6 +196,12 @@ class ScrollerBase : public ComponentBase {
     }
   }
 
+  void PublishContentHeight() {
+    if (content_height_out_ != nullptr) {
+      *content_height_out_ = content_height_;
+    }
+  }
+
   bool Focusable() const final { return true; }
 
   Ref<int> selected_;
@@ -200,6 +210,7 @@ class ScrollerBase : public ComponentBase {
   Ref<int> selected_x_;
   Ref<int> viewport_width_;
   Ref<bool> horizontal_scroll_;
+  int* content_height_out_;
    int content_height_ = -1;
    int content_width_ = -1;
    int measured_wrap_width_ = -1;
@@ -213,12 +224,13 @@ class ScrollerBase : public ComponentBase {
 }  // namespace
 
 Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
-                   std::function<void(int, int)> on_change, Ref<int> selected_x,
-                   Ref<int> viewport_width, Ref<bool> horizontal_scroll) {
+                    std::function<void(int, int)> on_change, Ref<int> selected_x,
+                    Ref<int> viewport_width, Ref<bool> horizontal_scroll,
+                    int* content_height_out) {
   return Make<ScrollerBase>(std::move(child), std::move(selected),
                             std::move(viewport_height), std::move(on_change),
                             std::move(selected_x), std::move(viewport_width),
-                            std::move(horizontal_scroll));
+                            std::move(horizontal_scroll), content_height_out);
 }
 
 }  // namespace ftxui

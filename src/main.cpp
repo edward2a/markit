@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -11,6 +12,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
 
+#include "chrome.hpp"
 #include "config.hpp"
 #include "markdown.hpp"
 #include "scroller.hpp"
@@ -125,6 +127,17 @@ int main(int argc, char** argv) {
   int selected_x = 0;
   int viewport_height = 0;
   int viewport_width = 0;
+  int content_height = 0;
+  bool nav_visible = config.nav_visible;
+
+  // Static nav content: headings extracted once (no interaction yet).
+  const std::vector<markit::Heading> headings =
+      markit::ExtractHeadings(contents);
+
+  // The chrome takes screen space the content must not use: one separator
+  // row + action row + status row vertically, and the nav column (plus its
+  // separator) horizontally when visible.
+  constexpr int kChromeRows = 3;
 
   // Building the content tree re-parses the whole document, so cache it and
   // rebuild only when the display mode changes. The viewport size is
@@ -134,8 +147,9 @@ int main(int argc, char** argv) {
   Element cached_content;
   auto content = Renderer([&] {
     const auto term_size = Terminal::Size();
-    viewport_width = term_size.dimx;
-    viewport_height = term_size.dimy;
+    viewport_width = std::max(
+        1, term_size.dimx - (nav_visible ? markit::kNavWidth + 1 : 0));
+    viewport_height = std::max(1, term_size.dimy - kChromeRows);
     if (!cached_content || rendered_mode != content_cfg.horizontal_wrap) {
       rendered_mode = content_cfg.horizontal_wrap;
       Element fresh = markit::RenderMarkdown(contents, content_cfg);
@@ -148,10 +162,41 @@ int main(int argc, char** argv) {
   auto scroller =
       Scroller(std::move(content), &selected, &viewport_height,
                [&](int before, int after) { log("scroll", before, after); },
-               &selected_x, &viewport_width, &hscroll);
+               &selected_x, &viewport_width, &hscroll, &content_height);
+
+  auto clamp_selected = [&] {
+    const int max_offset = std::max(0, content_height - viewport_height);
+    selected = std::clamp(selected, 0, max_offset);
+  };
+
+  auto status_bar = Renderer([&] {
+    const int max_offset = std::max(0, content_height - viewport_height);
+    const int current = std::clamp(selected, 0, max_offset);
+    return markit::StatusBar(input_file, current, max_offset,
+                             content_cfg.horizontal_wrap);
+  });
+  auto action_bar = Renderer([] { return markit::ActionBar(); });
+  auto nav_bar = Renderer([&]() -> Element {
+    return nav_visible ? markit::NavBar(headings) : emptyElement();
+  });
+  auto nav_separator = Renderer([&]() -> Element {
+    return nav_visible ? separator() : emptyElement();
+  });
+
+  auto left_column = Container::Vertical({
+      scroller | flex,
+      Renderer([] { return separator(); }),
+      action_bar,
+      status_bar,
+  });
+  auto root = Container::Horizontal({
+      left_column | flex,
+      nav_separator,
+      nav_bar,
+  });
 
   auto screen = App::Fullscreen();
-  auto component = CatchEvent(scroller, [&](Event event) -> bool {
+  auto component = CatchEvent(root, [&](Event event) -> bool {
     if (debug.is_open()) {
       debug << "input: " << event.DebugString()
             << " (character: '" << event.character() << "')\n";
@@ -169,6 +214,12 @@ int main(int argc, char** argv) {
       selected_x = 0;  // re-anchor horizontally on mode switch.
       selected = 0;    // content height changes with the mode; restart at top.
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
+      return true;
+    }
+    if (event == Event::Character('n')) {
+      nav_visible = !nav_visible;
+      clamp_selected();  // the content column changed size; stay in range.
+      log("nav", nav_visible ? 0 : 1, nav_visible ? 1 : 0);
       return true;
     }
     return false;

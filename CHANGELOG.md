@@ -59,3 +59,7 @@ Change tag:
 - 2026-09-07T01:34:31Z - mod - Render HTML instead of boxing it: a tag subset (inline b/i/u/s/code/a/img/br plus block p/div/h1-6/blockquote/lists/hr, and the same inline tags inside markdown paragraphs) maps onto markdown styling and frames, while pre/script/style, comments and unknown tags stay verbatim in a single coalesced box
 - 2026-09-07T01:49:25Z - add - Render details/summary statically and always expanded: the summary gets a disclosure marker (open state) plus bold, content flows as normal blocks
 - 2026-09-07T02:06:35Z - mod - Restore blank row after headings: a heading owes the next block one blank row at every level; a --- rule following a heading carries that gap past itself (no blank between heading and rule, single blank after), standalone rules unchanged
+
+## 0.0.5 - 2026-09-07T11:42:18Z
+
+- 2026-09-07T11:42:18Z - add - Milestone 5 static chrome: status bar (basename + scroll position + wrap/scroll mode, inverted), action bar (key hints, dim), and full-height right navigation bar (TOC from document headings, "Outline" title); nav toggles live with 'n', defaults to display.navigation visible|hidden, content viewport shrinks around the chrome
