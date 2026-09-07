@@ -336,6 +336,68 @@ TEST(Markdown, WrapLinkLeadingSpaceIsNotUnderlined) {
       << "link label must be underlined";
 }
 
+// Whitespace *inside* a styled run keeps the style in wrap mode (matching
+// scroll mode, which renders the run as one continuous element), while the
+// boundary spaces around it stay plain.
+TEST(Markdown, WrapLinkInternalSpaceIsUnderlined) {
+  const std::string md = "seen [label one](https://e.test) tail\n";
+  ftxui::Screen screen(40, 4);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  int label_col = -1;
+  for (int c = 0; c < 40; ++c) {
+    if (screen.CellAt(c, 0).character == "l") {  // start of "label"
+      label_col = c;
+      break;
+    }
+  }
+  ASSERT_GE(label_col, 1);
+  // Boundary space before the link stays plain (see
+  // WrapLinkLeadingSpaceIsNotUnderlined)...
+  EXPECT_FALSE(screen.CellAt(label_col - 1, 0).underlined);
+  // ...but the space inside the label is underlined like the words.
+  int inner_space = -1;
+  for (int c = label_col; c < 40; ++c) {
+    if (screen.CellAt(c, 0).character == " ") {
+      inner_space = c;
+      break;
+    }
+  }
+  ASSERT_GE(inner_space, 0);
+  EXPECT_TRUE(screen.CellAt(inner_space, 0).underlined)
+      << "space inside the link label must stay underlined";
+  EXPECT_TRUE(screen.CellAt(inner_space + 1, 0).underlined)
+      << "link continuation must stay underlined";
+}
+
+// Same rule for inline code: the space inside `code span` keeps the
+// background instead of punching a plain gap.
+TEST(Markdown, WrapInlineCodeInternalSpaceKeepsBackground) {
+  const std::string md = "a `code span` b\n";
+  ftxui::Screen screen(40, 4);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  int code_col = -1;
+  for (int c = 0; c < 40; ++c) {
+    if (screen.CellAt(c, 0).character == "c") {  // start of "code"
+      code_col = c;
+      break;
+    }
+  }
+  ASSERT_GE(code_col, 1);
+  EXPECT_NE(screen.CellAt(code_col - 1, 0).background_color,
+            ftxui::Color::GrayDark);
+  int inner_space = -1;
+  for (int c = code_col; c < 40; ++c) {
+    if (screen.CellAt(c, 0).character == " ") {
+      inner_space = c;
+      break;
+    }
+  }
+  ASSERT_GE(inner_space, 0);
+  EXPECT_EQ(screen.CellAt(inner_space, 0).background_color,
+            ftxui::Color::GrayDark)
+      << "space inside inline code must keep the background";
+}
+
 // A hard break still forces a new rendered row in wrap mode (it closes the
 // current inline row regardless of wrapping).
 TEST(Markdown, WrapHardBreakForcesNewLine) {

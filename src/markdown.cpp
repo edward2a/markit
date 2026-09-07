@@ -80,6 +80,10 @@ class Renderer {
   struct Fragment {
     std::string text;
     Decorator style;
+    // Identity of the enclosing span stack (e.g. "em", "a:<href>"). Two
+    // fragments with equal keys carry the same style even when md4c split
+    // the text (soft breaks, entities); Decorator itself is not comparable.
+    std::string style_key;
   };
 
   struct Frame {
@@ -156,6 +160,17 @@ class Renderer {
     return result;
   }
 
+  std::string ComposedStyleKey() const {
+    std::string key;
+    for (const auto& k : span_keys_) {
+      if (!key.empty()) {
+        key += '\x1f';
+      }
+      key += k;
+    }
+    return key;
+  }
+
   void EmitInline(const std::string& text) {
     if (text.empty()) {
       return;
@@ -167,23 +182,30 @@ class Renderer {
         top.kind != Kind::Para && top.kind != Kind::Cell) {
       return;
     }
-    top.inline_.push_back(Fragment{text, ComposedStyle()});
+    top.inline_.push_back(Fragment{text, ComposedStyle(), ComposedStyleKey()});
   }
 
   // Split a row's fragments into word elements for wrap mode. A "word" is a
   // maximal run of non-space text; it may span several styled fragments (e.g.
   // `[a](url)b`), whose pieces are glued into one element so the wrap layout
-  // never breaks inside a word. Inter-word whitespace becomes a plain
-  // (unstyled) piece glued ahead of the following word, so the wrapping point
-  // lands exactly at the source's whitespace while a link/emphasis/code style
-  // no longer decorates the space itself. Overlong tokens (longer than the
+  // never breaks inside a word. Inter-word whitespace is glued ahead of the
+  // following word so the wrapping point lands exactly at the source's
+  // whitespace, and it keeps the word's style when the preceding piece has
+  // the same style key (whitespace *inside* a styled run, e.g. a multi-word
+  // link label, stays underlined like scroll mode renders it); at a style
+  // boundary it stays a plain piece. Overlong tokens (longer than the
   // viewport) are never split mid-word; they clip. Trailing whitespace is
   // kept as a final plain piece so an all-space row keeps its height.
   Element WrapRow(const std::vector<Fragment>& fragments) {
-    using Piece = std::pair<std::string, Decorator>;  // text, style
+    struct Piece {
+      std::string text;
+      Decorator style;
+      std::string key;
+    };
     Elements words;
     std::vector<Piece> cur;
     std::string pending;
+    std::string last_key;  // style key of the previously emitted piece.
 
     auto finish = [&]() {
       if (cur.empty()) {
@@ -192,12 +214,13 @@ class Renderer {
       Elements pieces;
       pieces.reserve(cur.size());
       for (auto& piece : cur) {
-        Element e = ftxui::text(std::move(piece.first));
-        if (piece.second) {
-          e = piece.second(std::move(e));
+        Element e = ftxui::text(std::move(piece.text));
+        if (piece.style) {
+          e = piece.style(std::move(e));
         }
         pieces.push_back(std::move(e));
       }
+      last_key = cur.back().key;
       words.push_back(pieces.size() == 1 ? std::move(pieces[0])
                                          : ftxui::hbox(std::move(pieces)));
       cur.clear();
@@ -228,14 +251,16 @@ class Renderer {
           }
           std::string word = frag.text.substr(i, j - i);
           if (!pending.empty()) {
-            // The inter-word whitespace stays a plain (unstyled) piece, glued
-            // ahead of the following word so the wrap point still lands on the
-            // source whitespace — but a link/emphasis/code style no longer
-            // decorates the space itself.
-            cur.emplace_back(std::move(pending), nullptr);
+            // Same-style run: the space belongs to the styled text (scroll
+            // mode renders it as one continuous element), so keep the style.
+            // At a style boundary the space stays plain.
+            const bool internal = (last_key == frag.style_key);
+            cur.push_back({std::move(pending),
+                           internal ? frag.style : Decorator(nullptr),
+                           internal ? frag.style_key : std::string()});
             pending.clear();
           }
-          cur.emplace_back(std::move(word), frag.style);
+          cur.push_back({std::move(word), frag.style, frag.style_key});
           i = j;
         }
       }
@@ -536,26 +561,34 @@ class Renderer {
     switch (type) {
       case MD_SPAN_EM:
         span_decorators_.push_back(ftxui::italic);
+        span_keys_.push_back("em");
         break;
       case MD_SPAN_STRONG:
         span_decorators_.push_back(ftxui::bold);
+        span_keys_.push_back("strong");
         break;
       case MD_SPAN_DEL:
         span_decorators_.push_back(ftxui::strikethrough);
+        span_keys_.push_back("del");
         break;
       case MD_SPAN_CODE:
         span_decorators_.push_back(InlineCodeStyle());
+        span_keys_.push_back("code");
         break;
       case MD_SPAN_A: {
         auto* a = static_cast<MD_SPAN_A_DETAIL*>(detail);
-        span_decorators_.push_back(LinkStyle(Attr(a->href)));
+        const std::string href = Attr(a->href);
+        span_decorators_.push_back(LinkStyle(href));
+        span_keys_.push_back("a:" + href);
         break;
       }
       case MD_SPAN_IMG:
         span_decorators_.push_back(ftxui::dim);
+        span_keys_.push_back("img");
         break;
       case MD_SPAN_U:
         span_decorators_.push_back(ftxui::underlined);
+        span_keys_.push_back("u");
         break;
       default:
         break;
@@ -574,6 +607,9 @@ class Renderer {
       case MD_SPAN_IMG:
         if (!span_decorators_.empty()) {
           span_decorators_.pop_back();
+        }
+        if (!span_keys_.empty()) {
+          span_keys_.pop_back();
         }
         break;
       default:
@@ -617,8 +653,10 @@ class Renderer {
           Top().text += s;
         } else {
           span_decorators_.push_back(InlineCodeStyle());
+          span_keys_.push_back("code");
           EmitInline(s);
           span_decorators_.pop_back();
+          span_keys_.pop_back();
         }
         break;
       default:
@@ -777,6 +815,7 @@ class Renderer {
   const bool wrap_;
   std::vector<Frame> frames_;
   std::vector<Decorator> span_decorators_;
+  std::vector<std::string> span_keys_;
 };
 
 }  // namespace
