@@ -41,6 +41,7 @@ add_library(markit_core STATIC
   src/scroller.cpp
   src/markdown.cpp
   src/chrome.cpp
+  src/anchor.cpp
   src/config.cpp
 )
 target_include_directories(markit_core
@@ -73,6 +74,7 @@ if (MARKIT_BUILD_TESTS)
       src/scroller_test.cpp
       src/markdown_test.cpp
       src/chrome_test.cpp
+      src/anchor_test.cpp
       src/config_test.cpp
     )
     target_link_libraries(markit-tests

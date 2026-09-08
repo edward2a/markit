@@ -13,6 +13,7 @@
 #include <ftxui/screen/terminal.hpp>
 
 #include "chrome.hpp"
+#include "anchor.hpp"
 #include "config.hpp"
 #include "markdown.hpp"
 #include "scroller.hpp"
@@ -208,11 +209,22 @@ int main(int argc, char** argv) {
       return true;
     }
     if (event == Event::Character('w')) {
+      const bool old_is_scroll = hscroll;
+      Element old_tree = cached_content;
       hscroll = !hscroll;
       content_cfg.horizontal_wrap =
           hscroll ? markit::WrapMode::Scroll : markit::WrapMode::Wrap;
       selected_x = 0;  // re-anchor horizontally on mode switch.
-      selected = 0;    // content height changes with the mode; restart at top.
+      // Rebuild the content tree for the new mode eagerly so the vertical
+      // offset can be mapped from the old tree (row numbers differ per
+      // mode); the content renderer below reuses this tree as-is.
+      Element fresh = markit::RenderMarkdown(contents, content_cfg);
+      fresh = is_empty_placeholder ? fresh | dim : std::move(fresh);
+      cached_content = fresh;
+      rendered_mode = content_cfg.horizontal_wrap;
+      selected = markit::MapTogglePosition(old_tree, fresh, headings, selected,
+                                           viewport_width, viewport_height,
+                                           old_is_scroll);
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
