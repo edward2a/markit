@@ -754,3 +754,33 @@ TEST(Anchor, RenderTextRowsScrollWidthStable) {
   }
   EXPECT_TRUE(saw_tail);
 }
+
+// Search extraction uses the viewport width in wrap mode ...
+TEST(Anchor, SearchExtractWidthWrapIsViewport) {
+  auto tree = markit::RenderMarkdown("# Alpha\n\nbody\n", WrapCfg());
+  EXPECT_EQ(markit::SearchExtractWidth(tree, kWidth, false), kWidth);
+  EXPECT_EQ(markit::SearchExtractWidth(tree, kWidth, true),
+            markit::SearchExtractWidth(tree, kWidth, true));  // stable
+}
+
+// ... and the natural width in scroll mode: short docs stay narrow (no
+// giant offscreen allocation), long lines widen past the viewport.
+TEST(Anchor, SearchExtractWidthScrollIsNatural) {
+  auto short_tree = markit::RenderMarkdown("# Alpha\n\nbody\n", ScrollCfg());
+  EXPECT_EQ(markit::SearchExtractWidth(short_tree, kWidth, true), kWidth);
+  const char* doc =
+      "# Alpha\n\n"
+      "a very long body line that exceeds the narrow test width by far\n";
+  auto long_tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const int wide = markit::SearchExtractWidth(long_tree, kWidth, true);
+  EXPECT_GT(wide, kWidth);
+  EXPECT_LE(wide, 8192);
+}
+
+// Unusable inputs fall back to a sane width instead of crashing.
+TEST(Anchor, SearchExtractWidthGuards) {
+  EXPECT_EQ(markit::SearchExtractWidth(ftxui::Element(), kWidth, true),
+            kWidth);
+  auto tree = markit::RenderMarkdown("# A\n", ScrollCfg());
+  EXPECT_EQ(markit::SearchExtractWidth(tree, 0, false), 1);
+}

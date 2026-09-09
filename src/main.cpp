@@ -172,6 +172,8 @@ int main(int argc, char** argv) {
   // nothing (callers never reach the matcher with it).
   ftxui::Element search_tree;
   int search_width = -1;
+  int search_w_viewport = -1;  // width inputs, cached so the per-frame cost
+  bool search_w_scroll = false;  // stays at pointer/int compares.
   std::string search_compiled;
   bool search_case = false;
   bool search_invalid = false;
@@ -268,33 +270,49 @@ int main(int argc, char** argv) {
     log("goto", before, selected);
   };
 
-  // Recompute the search match list when the tree, its extract width, the
-  // query, or the case flag changed. Wrap trees extract at the viewport
-  // width (what the user sees); scroll trees extract wide (rows never split
-  // there, so indices stay aligned while clipped text becomes searchable).
+  // Recompute the search state, split across two caches so typing stays
+  // cheap. Rows depend only on the tree and its extract width (viewport in
+  // wrap, natural width in scroll): re-extracted only when those change.
+  // The offscreen render is the expensive step — width x height cells, so
+  // an uncapped wide render blocks the event loop for seconds — and must
+  // never run per keystroke. Matches depend on the rows plus the query: a
+  // changed query is just a regex re-scan of the cached rows and drops the
+  // match cursor, while a changed tree (e.g. mode toggle) only clamps it.
   // Matches outlive the prompt: closing it hides the UI but keeps the query
-  // so n/N keep navigating. A changed query drops the match cursor; a
-  // changed tree only clamps it.
+  // so n/N keep navigating.
   auto refresh_search = [&] {
     if (search_query.empty()) {
+      search_rows.clear();
       search_matches.clear();
       search_pos = -1;
       search_invalid = false;
+      search_tree = ftxui::Element();
+      search_width = -1;
+      search_w_viewport = -1;
+      search_compiled.clear();
       return;
     }
-    const int width = hscroll ? 8192 : viewport_width;
+    if (!cached_content || viewport_width < 1 || viewport_height < 1) {
+      return;
+    }
+    bool rows_changed = false;
+    if (!search_tree || search_tree.get() != cached_content.get() ||
+        search_w_viewport != viewport_width || search_w_scroll != hscroll) {
+      search_width = markit::SearchExtractWidth(cached_content,
+                                                viewport_width, hscroll);
+      search_rows = markit::RenderTextRows(
+          cached_content, search_width, std::max(1, content_height));
+      search_tree = cached_content;
+      search_w_viewport = viewport_width;
+      search_w_scroll = hscroll;
+      rows_changed = true;
+    }
     const bool query_changed = (search_compiled != search_query ||
                                 search_case != config.search_case_sensitive);
-    if (cached_content && viewport_width >= 1 && viewport_height >= 1 &&
-        (!search_tree || search_tree.get() != cached_content.get() ||
-         search_width != width || query_changed)) {
-      search_rows = markit::RenderTextRows(
-          cached_content, width, std::max(1, content_height));
+    if (rows_changed || query_changed) {
       markit::Re2Matcher matcher(search_query, config.search_case_sensitive);
       search_invalid = !matcher.ok();
       search_matches = markit::FindMatches(search_rows, matcher);
-      search_tree = cached_content;
-      search_width = width;
       search_compiled = search_query;
       search_case = config.search_case_sensitive;
       if (query_changed) {

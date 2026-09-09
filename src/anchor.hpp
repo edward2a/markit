@@ -41,6 +41,15 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
                                         int height_hint);
 
+// Extract width for search rows: the viewport width in wrap mode; in scroll
+// mode the tree's natural width, so clipped text is searchable while row
+// indices stay stable (scroll rows never split). Passing the full width
+// matters for performance: the offscreen Screen allocates width x height
+// cells, so an uncapped wide render on a tall document costs hundreds of
+// megabytes per extraction and blocks the event loop for seconds.
+int SearchExtractWidth(const ftxui::Element& tree, int viewport_width,
+                       bool is_scroll);
+
 // Map the top-of-view position from one mode's tree to the other's.
 // `old_selected` is the pre-toggle offset, `old_is_scroll` the pre-toggle
 // mode; widths/heights are the live viewport values. Returns the new offset,

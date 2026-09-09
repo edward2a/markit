@@ -366,6 +366,18 @@ std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
   return rows;
 }
 
+int SearchExtractWidth(const ftxui::Element& tree, int viewport_width,
+                        bool is_scroll) {
+  if (!is_scroll || !tree || viewport_width < 1) {
+    return std::max(1, viewport_width);
+  }
+  // The tree's own requirement: scroll rows never split, so the natural
+  // width exposes every clipped character with stable row indices — at a
+  // fraction of the cells of an uncapped wide render.
+  tree->ComputeRequirement();
+  return NaturalWidth(tree->requirement().min_x, viewport_width);
+}
+
 int MapTogglePosition(const ftxui::Element& old_tree,
                       const ftxui::Element& new_tree,
                       const std::vector<Heading>& headings, int old_selected,
