@@ -29,12 +29,21 @@ namespace ftxui {
 /// @param content_height_out Optional out-param receiving the measured content
 ///        height (scroll or wrapped) on every render, for chrome such as a
 ///        status bar. Null when unneeded; -1 before the first render.
+/// @param wrap_hint_w Optional shared width of a pre-measured wrap height
+///        (see wrap_hint_h). When it equals the current viewport width on a
+///        wrap-mode render, the stored height is adopted instead of
+///        re-measuring; consumed (reset to -1) on adopt. -1 disables.
+/// @param wrap_hint_h Optional shared pre-measured wrap height, in rows
+///        through the last non-blank one (same semantics as the internal
+///        measurement), for the width in wrap_hint_w. -1 disables.
 Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
                     std::function<void(int before, int after)> on_change = {},
                     Ref<int> selected_x = Ref<int>(0),
                     Ref<int> viewport_width = Ref<int>(1),
                     Ref<bool> horizontal_scroll = Ref<bool>(false),
-                    int* content_height_out = nullptr);
+                    int* content_height_out = nullptr,
+                    Ref<int> wrap_hint_w = Ref<int>(-1),
+                    Ref<int> wrap_hint_h = Ref<int>(-1));
 
 }  // namespace ftxui
 

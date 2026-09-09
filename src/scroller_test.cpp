@@ -441,3 +441,35 @@ TEST(Scroller, WrapAdaptsToViewportWidthChange) {
   EXPECT_NE(first_row(72).find("mu"), std::string::npos)
       << "widening again restores the single-row layout";
 }
+
+// A matching pre-measured wrap hint is adopted instead of measuring, and the
+// hint is consumed.
+TEST(Scroller, WrapHintAdoptedWhenWidthsMatch) {
+  int selected = 0;
+  int viewport = kHeight;
+  int hint_w = kWidth;
+  int hint_h = 37;
+  int content_height = -1;
+  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport, {}, 0,
+                                  kWidth, false, &content_height, &hint_w,
+                                  &hint_h);
+  Prime(scroller);
+  EXPECT_EQ(content_height, 37);
+  EXPECT_EQ(hint_w, -1);
+}
+
+// A hint for another width is ignored: the height is measured normally and
+// the stale hint is kept for a later resize back.
+TEST(Scroller, WrapHintIgnoredOnWidthMismatch) {
+  int selected = 0;
+  int viewport = kHeight;
+  int hint_w = kWidth + 1;
+  int hint_h = 37;
+  int content_height = -1;
+  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport, {}, 0,
+                                  kWidth, false, &content_height, &hint_w,
+                                  &hint_h);
+  Prime(scroller);
+  EXPECT_EQ(content_height, 60);
+  EXPECT_EQ(hint_w, kWidth + 1);
+}

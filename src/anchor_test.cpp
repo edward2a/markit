@@ -488,9 +488,123 @@ TEST(Anchor, GuardsAndClamp) {
             0);
 
   const int mapped = markit::MapTogglePosition(tree, tree, headings, 100000,
-                                               kWidth, kHeight, true);
+                                                kWidth, kHeight, true);
   const auto rows = LayoutRows(markit::RenderMarkdown(kDoc, ScrollCfg()),
                                kWidth);
   const int max_offset = std::max(0, static_cast<int>(rows.size()) - kHeight);
   EXPECT_EQ(mapped, max_offset);
+}
+
+// Narrow viewport: a continuation fragment past the clip forces the exact
+// wide rematch, landing on the owning scroll line. The long paragraph sits
+// at the top above many fillers so the proportional estimate provably misses
+// the owning line (it lands a few rows down instead).
+TEST(Anchor, NarrowContinuationToScrollUsesWideFallback) {
+  constexpr int kNarrow = 20;
+  std::string doc =
+      "this long paragraph has many words so it must wrap onto several rows\n";
+  for (int i = 0; i < 20; ++i) {
+    doc += "\nplain filler line number " + std::to_string(i) + "\n";
+  }
+  auto old_tree = markit::RenderMarkdown(doc, WrapCfg());
+  auto new_tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const auto headings = markit::ExtractHeadings(doc);
+  const auto old_rows = LayoutRows(markit::RenderMarkdown(doc, WrapCfg()),
+                                   kNarrow);
+  int anchor = -1;
+  for (int r = 0; r < static_cast<int>(old_rows.size()); ++r) {
+    if (!old_rows[r].empty() &&
+        old_rows[r].rfind("this long paragraph", 0) != 0 &&
+        old_rows[r].find("wrap onto") != std::string::npos) {
+      anchor = r;
+      break;
+    }
+  }
+  ASSERT_GE(anchor, 0) << "need a wrapped continuation fragment";
+
+  const int mapped = markit::MapTogglePosition(
+      old_tree, new_tree, headings, anchor, kNarrow, kHeight, false);
+
+  const auto new_rows = LayoutRows(markit::RenderMarkdown(doc, ScrollCfg()),
+                                   kWidth);
+  EXPECT_EQ(mapped, FindPrefix(new_rows, "this long paragraph"));
+}
+
+// Narrow viewport: a truncated but unique fingerprint still maps narrow to
+// the first fragment, and reports the new wrap height.
+TEST(Anchor, NarrowTruncatedFingerprintKeepsUniqueLine) {
+  constexpr int kNarrow = 20;
+  auto old_tree = markit::RenderMarkdown(kDoc, ScrollCfg());
+  auto new_tree = markit::RenderMarkdown(kDoc, WrapCfg());
+  const auto headings = markit::ExtractHeadings(kDoc);
+  const auto old_rows = LayoutRows(markit::RenderMarkdown(kDoc, ScrollCfg()),
+                                   kNarrow);
+  const int anchor = FindPrefix(old_rows, "this long paragraph");
+  ASSERT_GE(anchor, 0);
+
+  int new_height = -1;
+  const int mapped = markit::MapTogglePosition(
+      old_tree, new_tree, headings, anchor, kNarrow, kHeight, true,
+      &new_height);
+
+  const auto new_rows = LayoutRows(markit::RenderMarkdown(kDoc, WrapCfg()),
+                                   kNarrow);
+  ASSERT_LT(mapped, static_cast<int>(new_rows.size()));
+  EXPECT_EQ(new_rows[mapped].rfind("this long paragraph", 0), 0u);
+  EXPECT_EQ(new_height, static_cast<int>(new_rows.size()));
+}
+
+// Narrow viewport: two lines sharing a clipped prefix are ambiguous narrow,
+// so the wide rematch plus nearness to the proportional estimate picks the
+// right line. The anchor sits mid-document so the estimate is meaningful
+// (a tiny doc degenerates it to 0); identical first-fragments can only be
+// separated by position.
+TEST(Anchor, NarrowAmbiguousPrefixFallsBackToWide) {
+  constexpr int kNarrow = 20;
+  std::string doc = "# T\n";
+  for (int i = 0; i < 6; ++i) {
+    doc += "\ntop filler line number " + std::to_string(i) + "\n";
+  }
+  doc +=
+      "\nalpha beta gamma delta epsilon zeta eta theta iota kappa one tail end\n"
+      "\n"
+      "alpha beta gamma delta epsilon zeta eta theta iota kappa two tail end\n";
+  for (int i = 0; i < 14; ++i) {
+    doc += "\nbottom filler line number " + std::to_string(i) + "\n";
+  }
+  auto old_tree = markit::RenderMarkdown(doc, ScrollCfg());
+  auto new_tree = markit::RenderMarkdown(doc, WrapCfg());
+  const auto headings = markit::ExtractHeadings(doc);
+  const auto old_rows = LayoutRows(markit::RenderMarkdown(doc, ScrollCfg()),
+                                   kNarrow);
+  // Anchor on the SECOND line's scroll row.
+  const int first = FindPrefix(old_rows, "alpha beta gamma");
+  ASSERT_GE(first, 0);
+  const int second = FindPrefix(old_rows, "alpha beta gamma", first + 1);
+  ASSERT_GE(second, 0) << "scroll rows keep one row per line";
+
+  const int mapped = markit::MapTogglePosition(
+      old_tree, new_tree, headings, second, kNarrow, kHeight, true);
+
+  const auto new_rows = LayoutRows(markit::RenderMarkdown(doc, WrapCfg()),
+                                   kNarrow);
+  // Line 2's fragments run from its first fragment through "two tail end".
+  int line2_last = -1;
+  for (int r = 0; r < static_cast<int>(new_rows.size()); ++r) {
+    if (new_rows[r].find("two tail end") != std::string::npos) {
+      line2_last = r;
+      break;
+    }
+  }
+  ASSERT_GE(line2_last, 0);
+  int line2_first = -1;
+  for (int r = line2_last; r >= 0; --r) {
+    if (new_rows[r].rfind("alpha beta gamma", 0) == 0) {
+      line2_first = r;
+      break;  // nearest line-start above the "two" tail: line 2's own.
+    }
+  }
+  ASSERT_GE(line2_first, 0);
+  EXPECT_GE(mapped, line2_first);
+  EXPECT_LE(mapped, line2_last) << "mapped row: '" << new_rows[mapped] << "'";
 }

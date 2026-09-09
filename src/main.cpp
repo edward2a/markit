@@ -130,6 +130,11 @@ int main(int argc, char** argv) {
   int viewport_width = 0;
   int content_height = 0;
   bool nav_visible = config.nav_visible;
+  // Pre-measured wrap height from the toggle path: the anchor already renders
+  // the new tree at the viewport width, so the scroller can adopt the height
+  // instead of measuring again. Width -1 disables.
+  int wrap_hint_w = -1;
+  int wrap_hint_h = -1;
 
   // Static nav content: headings extracted once (no interaction yet).
   const std::vector<markit::Heading> headings =
@@ -163,7 +168,8 @@ int main(int argc, char** argv) {
   auto scroller =
       Scroller(std::move(content), &selected, &viewport_height,
                [&](int before, int after) { log("scroll", before, after); },
-               &selected_x, &viewport_width, &hscroll, &content_height);
+               &selected_x, &viewport_width, &hscroll, &content_height,
+               &wrap_hint_w, &wrap_hint_h);
 
   auto clamp_selected = [&] {
     const int max_offset = std::max(0, content_height - viewport_height);
@@ -222,9 +228,18 @@ int main(int argc, char** argv) {
       fresh = is_empty_placeholder ? fresh | dim : std::move(fresh);
       cached_content = fresh;
       rendered_mode = content_cfg.horizontal_wrap;
+      int new_height = 0;
       selected = markit::MapTogglePosition(old_tree, fresh, headings, selected,
                                            viewport_width, viewport_height,
-                                           old_is_scroll);
+                                           old_is_scroll, &new_height);
+      if (!hscroll) {
+        // Toggle target is wrap: hand the anchor's new-tree row count to the
+        // scroller so it adopts the height instead of re-measuring.
+        wrap_hint_w = viewport_width;
+        wrap_hint_h = new_height;
+      } else {
+        wrap_hint_w = -1;
+      }
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
