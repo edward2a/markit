@@ -179,6 +179,7 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
 void ValidateDisplay(const YAML::Node& display, Config& cfg) {
   static const std::unordered_set<std::string> kKnown = {
       "horizontal",
+      "navigation",
   };
 
   if (!display.IsMap()) {
@@ -207,6 +208,22 @@ void ValidateDisplay(const YAML::Node& display, Config& cfg) {
         throw std::runtime_error(
             "config: display.horizontal: invalid value '" + value.Scalar() +
             "' (expected 'wrap' or 'scroll')");
+      }
+    } else if (key == "navigation") {
+      if (!value.IsScalar()) {
+        throw std::runtime_error(
+            "config: display.navigation: expected a string (visible or "
+            "hidden)");
+      }
+      const std::string visibility = Lowercase(value.Scalar());
+      if (visibility == "visible") {
+        cfg.nav_visible = true;
+      } else if (visibility == "hidden") {
+        cfg.nav_visible = false;
+      } else {
+        throw std::runtime_error(
+            "config: display.navigation: invalid value '" + value.Scalar() +
+            "' (expected 'visible' or 'hidden')");
       }
     } else if (kKnown.count(key) == 0) {
       throw std::runtime_error("config: display." + key + ": unknown key");
@@ -339,6 +356,8 @@ void DumpDefaultConfig(std::ostream& out) {
       << "  horizontal: " << (Config{}.horizontal_wrap == WrapMode::Scroll
                                   ? "scroll"
                                   : "wrap")
+      << "\n"
+      << "  navigation: " << (Config{}.nav_visible ? "visible" : "hidden")
       << "\n";
 }
 

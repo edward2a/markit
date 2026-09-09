@@ -252,6 +252,13 @@ class Renderer {
     Elements words;
     std::vector<Piece> cur;
     std::string pending;
+    // Style key of the fragment run that produced `pending`. A whitespace run
+    // keeps the following word's style only when it comes from the same styled
+    // run (e.g. spaces inside one link label): whitespace carried across a
+    // fragment boundary from a *different* run stays plain, so two adjacent
+    // links sharing one URL (e.g. badges with href="#") don't get their gap
+    // underlined. A run spanning style boundaries degrades to plain ("").
+    std::string pending_key;
     std::string last_key;  // style key of the previously emitted piece.
 
     auto finish = [&]() {
@@ -289,7 +296,15 @@ class Renderer {
           if (!cur.empty()) {
             finish();
           }
-          pending += frag.text.substr(i, j - i);  // inter-word whitespace
+          // Inter-word whitespace: normalize tabs/newlines to spaces so no
+          // text() element ever contains "\n" (hflow would break the row on
+          // it, stranding styled spaces on the next visual line).
+          if (pending.empty()) {
+            pending_key = frag.style_key;
+          } else if (frag.style_key != pending_key) {
+            pending_key.clear();  // run spans styles: stays plain.
+          }
+          pending.append(j - i, ' ');
           i = j;
         } else {
           size_t j = i;
@@ -301,7 +316,8 @@ class Renderer {
             // Same-style run: the space belongs to the styled text (scroll
             // mode renders it as one continuous element), so keep the style.
             // At a style boundary the space stays plain.
-            const bool internal = (last_key == frag.style_key);
+            const bool internal = (pending_key == frag.style_key &&
+                                   last_key == frag.style_key);
             cur.push_back({std::move(pending),
                            internal ? frag.style : Decorator(nullptr),
                            internal ? frag.style_key : std::string()});
@@ -398,6 +414,29 @@ class Renderer {
       }
     }
     return true;
+  }
+
+  // Collapse HTML whitespace: any run of space/tab/CR/LF becomes one space,
+  // like browsers (and like md4c soft breaks, which arrive as " "). Raw
+  // newlines must never reach a text() element: hflow treats "\n" as a row
+  // break, stranding styled (underlined/hyperlink) spaces on the next visual
+  // row as a phantom underlined line carrying the link URL.
+  static std::string CollapseHtmlSpace(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    bool in_space = false;
+    for (char c : s) {
+      if (IsHtmlSpace(c)) {
+        if (!in_space) {
+          out += ' ';
+          in_space = true;
+        }
+      } else {
+        out += c;
+        in_space = false;
+      }
+    }
+    return out;
   }
 
   static bool IsTagChar(char c) {
@@ -524,11 +563,36 @@ class Renderer {
     if (text.empty()) {
       return;
     }
-    if (IsInlineCapable(Top().kind)) {
-      EmitInline(text);
+    const std::string collapsed = CollapseHtmlSpace(text);
+    if (collapsed.empty()) {
       return;
     }
-    if (IsAllSpace(text)) {
+    // Formatting indent right after <a> is not link content: skip
+    // whitespace-only fragments until the first real content arrives. The key
+    // must match (a nested span means real content started elsewhere).
+    if (!link_ws_key_.empty()) {
+      if (IsAllSpace(collapsed) && ComposedStyleKey() == link_ws_key_) {
+        return;
+      }
+      link_ws_key_.clear();
+    }
+    // md4c splits one whitespace run into several callbacks (e.g. "\n" then
+    // "  "), so consecutive whitespace-only fragments with the same style
+    // would accumulate into double spaces. One suffices (HTML collapses).
+    if (IsAllSpace(collapsed) && !frames_.empty()) {
+      const Frame& top = Top();
+      if (!top.inline_.empty()) {
+        const Fragment& last = top.inline_.back();
+        if (IsAllSpace(last.text) && last.style_key == ComposedStyleKey()) {
+          return;
+        }
+      }
+    }
+    if (IsInlineCapable(Top().kind)) {
+      EmitInline(collapsed);
+      return;
+    }
+    if (IsAllSpace(collapsed)) {
       return;  // indentation/newlines between block tags.
     }
     const size_t before = frames_.size();
@@ -536,7 +600,7 @@ class Renderer {
     if (frames_.size() == before) {
       return;  // unexpected frame; drop rather than corrupt the stack.
     }
-    EmitInline(text);
+    EmitInline(collapsed);
   }
 
   // A <br> break: end the current row, forcing a blank row when the
@@ -770,12 +834,29 @@ class Renderer {
     }
     if (name == "a") {
       if (closing) {
+        // Drop formatting whitespace before </a> (e.g. the newline+indent
+        // around a lone <img/>): it would render as link-styled padding
+        // around the image. Genuine label text is never whitespace-only.
+        if (IsInlineCapable(Top().kind) && !Top().inline_.empty()) {
+          const std::string key = ComposedStyleKey();
+          while (!Top().inline_.empty()) {
+            const Fragment& back = Top().inline_.back();
+            if (!IsAllSpace(back.text) || back.style_key != key) {
+              break;
+            }
+            Top().inline_.pop_back();
+          }
+        }
+        link_ws_key_.clear();
         HtmlCloseSpan("a:", true);
       } else {
         const std::string href = HtmlAttr(attrs, "href");
         HtmlOpenSpan(href.empty() ? Decorator(ftxui::underlined)
                                   : LinkStyle(href),
                      "a:" + href);
+        // Skip formatting whitespace right after <a> (see the close branch):
+        // the first real content clears this.
+        link_ws_key_ = "a:" + href;
       }
       return;
     }
@@ -1085,9 +1166,13 @@ class Renderer {
 
   // End inline-HTML interpretation for a markdown block: a tag split
   // across md4c callbacks that never completed shows literally (rather than
-  // leaking into the next block), and unclosed tag entries reset so later
-  // stray closes have nothing to pop. No-op inside HTML blocks (the HTML
-  // leave path handles its own state).
+  // leaking into the next block), and unclosed tag entries are popped so
+  // their decorators/keys cannot leak into later blocks (a bare count reset
+  // would leave stale entries behind, corrupting style-key matching for
+  // link whitespace, </a> trimming, and wrap continuity). md4c closes every
+  // markdown span before the block leave, so remaining owned entries are
+  // HTML ones. No-op inside HTML blocks (the HTML leave path handles its
+  // own state).
   void EndHtmlParaContext() {
     if (in_html_) {
       return;
@@ -1100,6 +1185,13 @@ class Renderer {
       span_keys_.pop_back();
       html_chunk_.clear();
     }
+    while (html_open_count_ > 0 && !span_decorators_.empty() &&
+           !span_keys_.empty()) {
+      span_decorators_.pop_back();
+      span_keys_.pop_back();
+      --html_open_count_;
+    }
+    link_ws_key_.clear();
     html_open_count_ = 0;
   }
 
@@ -1330,6 +1422,7 @@ class Renderer {
           html_align_ = 0;
           summary_open_ = false;
           details_stack_.clear();
+          link_ws_key_.clear();
         }
         Frame top = Pop();
         if (type == MD_BLOCK_HTML && top.children.empty()) {
@@ -1490,11 +1583,23 @@ class Renderer {
     switch (type) {
       case MD_TEXT_NORMAL:
       case MD_TEXT_ENTITY:
+        // Inside an HTML block plain text joins the tag stream so source
+        // newlines collapse and merge like any other HTML whitespace.
+        if (in_html_) {
+          HtmlInlineText(s);
+        } else {
+          EmitInline(s);
+        }
+        break;
       case MD_TEXT_NULLCHAR:
         EmitInline(s);
         break;
       case MD_TEXT_SOFTBR:
-        EmitInline(" ");
+        if (in_html_) {
+          HtmlInlineText(" ");
+        } else {
+          EmitInline(" ");
+        }
         break;
       case MD_TEXT_BR:
         // A trailing-streak hard break ends the current inline row instead of
@@ -1698,6 +1803,10 @@ class Renderer {
   char html_align_ = 0;       // 'c' inside <p>/<div align=center>.
   std::vector<char> details_stack_;  // 'o' per open <details open>.
   bool summary_open_ = false;  // a <summary> paragraph collects text.
+  // Skip whitespace-only fragments right after an <a> open (formatting
+  // indent, not link content); cleared by the first real content, the
+  // matching close, or any HTML state reset. Empty when inactive.
+  std::string link_ws_key_;
 };
 
 }  // namespace

@@ -75,5 +75,9 @@ Testing/
 # vim
 *.swp
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # AI plans
 PLAN*.md
