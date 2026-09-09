@@ -938,6 +938,78 @@ TEST(Markdown, InlineHtmlInParagraphIsCodeStyled) {
   EXPECT_FALSE(screen.CellAt(tag_col, 0).underlined);
 }
 
+// Regression (FTXUI README Contributors tail): the closing anchor/img block
+// after the last heading renders its placeholder instead of a blank row.
+TEST(Markdown, ContributorsTailRendersImagePlaceholder) {
+  const std::string md =
+      "## Contributors\n"
+      "\n"
+      "<a href=\"https://github.com/ArthurSonzogni/FTXUI/graphs/contributors\">\n"
+      "  <img src=\"https://contrib.rocks/image?repo=ArthurSonzogni/FTXUI\" />\n"
+      "</a>\n";
+  for (markit::WrapMode mode :
+       {markit::WrapMode::Wrap, markit::WrapMode::Scroll}) {
+    markit::Config cfg;
+    cfg.horizontal_wrap = mode;
+    auto lines = RenderLines(md, cfg, 60, 10);
+    EXPECT_TRUE(AnyLineContains(lines, "[img]"))
+        << "tail [img] must render in mode " << static_cast<int>(mode);
+    EXPECT_TRUE(AnyLineContains(lines, "Contributors"));
+  }
+}
+
+// Tail variants: missing trailing newline, non-self-closed img, and content
+// before the tail (paragraph, details section) must not hide the placeholder.
+TEST(Markdown, ContributorsTailVariantsRender) {
+  const std::string href = "https://c.test/contributors";
+  const std::string no_trailing = "## Contributors\n\n<a href=\"" + href +
+                                  "\">\n  <img src=\"x.png\" />\n</a>";
+  const std::string no_slash = "## Contributors\n\n<a href=\"" + href +
+                               "\">\n  <img src=\"x.png\">\n</a>\n";
+  const std::string after_para = "Some text.\n\n" + no_slash;
+  const std::string after_details =
+      "<details><summary>Box</summary>\n\nBody.\n\n</details>\n\n" + no_slash;
+  for (const std::string& md :
+       {no_trailing, no_slash, after_para, after_details}) {
+    for (markit::WrapMode mode :
+         {markit::WrapMode::Wrap, markit::WrapMode::Scroll}) {
+      markit::Config cfg;
+      cfg.horizontal_wrap = mode;
+      auto lines = RenderLines(md, cfg, 60, 12);
+      EXPECT_TRUE(AnyLineContains(lines, "[img]"))
+          << "variant must render [img] in mode " << static_cast<int>(mode)
+          << ": [" << md << "]";
+    }
+  }
+}
+
+// Unclosed inline HTML must not leak its style into later blocks: the
+// paragraph leave pops entries the stray open pushed.
+TEST(Markdown, UnclosedInlineHtmlDoesNotLeakIntoNextParagraph) {
+  const std::string md = "first <b>bold\n\nsecond\n";
+  ftxui::Screen screen(40, 6);
+  ftxui::Render(screen, markit::RenderMarkdown(md, {}));
+  int second_row = -1;
+  for (int r = 0; r < 6; ++r) {
+    std::string row;
+    for (int c = 0; c < 40; ++c) {
+      row += screen.CellAt(c, r).character;
+    }
+    if (row.find("second") != std::string::npos) {
+      second_row = r;
+      break;
+    }
+  }
+  ASSERT_GE(second_row, 0) << "'second' paragraph must render";
+  for (int c = 0; c < 40; ++c) {
+    if (screen.CellAt(c, second_row).character == "s") {
+      EXPECT_FALSE(screen.CellAt(c, second_row).bold)
+          << "unclosed <b> must not leak past its paragraph";
+      break;
+    }
+  }
+}
+
 // Overlong tokens are never split mid-word in wrap mode: a 40-column token
 // in a 20-column viewport clips instead of breaking.
 TEST(Markdown, OverlongTokenClipsInWrapMode) {

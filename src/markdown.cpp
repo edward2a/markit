@@ -1166,9 +1166,13 @@ class Renderer {
 
   // End inline-HTML interpretation for a markdown block: a tag split
   // across md4c callbacks that never completed shows literally (rather than
-  // leaking into the next block), and unclosed tag entries reset so later
-  // stray closes have nothing to pop. No-op inside HTML blocks (the HTML
-  // leave path handles its own state).
+  // leaking into the next block), and unclosed tag entries are popped so
+  // their decorators/keys cannot leak into later blocks (a bare count reset
+  // would leave stale entries behind, corrupting style-key matching for
+  // link whitespace, </a> trimming, and wrap continuity). md4c closes every
+  // markdown span before the block leave, so remaining owned entries are
+  // HTML ones. No-op inside HTML blocks (the HTML leave path handles its
+  // own state).
   void EndHtmlParaContext() {
     if (in_html_) {
       return;
@@ -1180,6 +1184,12 @@ class Renderer {
       span_decorators_.pop_back();
       span_keys_.pop_back();
       html_chunk_.clear();
+    }
+    while (html_open_count_ > 0 && !span_decorators_.empty() &&
+           !span_keys_.empty()) {
+      span_decorators_.pop_back();
+      span_keys_.pop_back();
+      --html_open_count_;
     }
     link_ws_key_.clear();
     html_open_count_ = 0;

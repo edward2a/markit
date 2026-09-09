@@ -458,6 +458,46 @@ TEST(Scroller, WrapHintAdoptedWhenWidthsMatch) {
   EXPECT_EQ(hint_w, -1);
 }
 
+// At End the viewport's bottom row shows the last content line: the frame
+// focus math must land exactly on `selected` (an off-by-one there hid the
+// final row, e.g. the README Contributors [img], at 100% in scroll mode).
+// Odd viewport heights deterministically expose the error.
+TEST(Scroller, EndShowsLastLineAtBottomRow) {
+  const int height = 9;  // odd: the inclusive frame box halves asymmetrically
+  const int n = 30;
+  for (bool hscroll : {false, true}) {
+    int selected = 0;
+    int viewport_height = height;
+    int selected_x = 0;
+    int viewport_width = kWidth;
+    auto scroller = ftxui::Scroller(MakeLines(n), &selected, &viewport_height,
+                                    {}, &selected_x, &viewport_width, &hscroll);
+    Prime(scroller);
+    ASSERT_TRUE(scroller->OnEvent(ftxui::Event::End));
+    EXPECT_EQ(selected, n - height);
+    ftxui::Screen screen(kWidth, height);
+    ftxui::Render(screen, scroller->Render());
+    std::string top;
+    for (int c = 0; c < kWidth; ++c) {
+      top += screen.CellAt(c, 0).character;
+    }
+    while (!top.empty() && top.back() == ' ') {
+      top.pop_back();
+    }
+    EXPECT_EQ(top, "line-" + std::to_string(n - height))
+        << "top row at End in " << (hscroll ? "scroll" : "wrap") << " mode";
+    std::string bottom;
+    for (int c = 0; c < kWidth; ++c) {
+      bottom += screen.CellAt(c, height - 1).character;
+    }
+    while (!bottom.empty() && bottom.back() == ' ') {
+      bottom.pop_back();
+    }
+    EXPECT_EQ(bottom, "line-" + std::to_string(n - 1))
+        << "bottom row at End in " << (hscroll ? "scroll" : "wrap") << " mode";
+  }
+}
+
 // A hint for another width is ignored: the height is measured normally and
 // the stale hint is kept for a later resize back.
 TEST(Scroller, WrapHintIgnoredOnWidthMismatch) {

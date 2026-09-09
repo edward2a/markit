@@ -95,11 +95,15 @@ class ScrollerBase : public ComponentBase {
     *viewport_width_ = viewport_width;
 
     // Invert the frame's centering so the top visible line equals `selected`.
-    // The frame computes dy = content*y - viewport/2; we want dy = selected,
-    // hence y = (selected + viewport/2 - 1) / content. The -1 is for the
-    // frame's exclusive box bounds. This is re-clamped in wrap mode after the
-    // wrapped height is measured.
-    float y = static_cast<float>(*selected_) + viewport_height / 2.f - 1.f;
+    // The frame works on inclusive boxes (max - min = size - 1): it offsets
+    // with dy = focus - external/2 where external = viewport - 1 is halved
+    // with integer division, then truncates the focus product with int().
+    // Mirror that here and add +0.5 so the truncation lands on the intended
+    // row. (The old `- 1` assumed exclusive bounds: every position showed
+    // one row too early and the last row stayed unreachable at End.) This is
+    // re-clamped in wrap mode after the wrapped height is measured.
+    float y = static_cast<float>(*selected_) +
+              static_cast<float>((viewport_height - 1) / 2) + 0.5f;
 
     // Scroll mode: content keeps its natural (full) width so it can be
     // panned. The wrap measurement below is mode-specific (the content tree
@@ -111,7 +115,9 @@ class ScrollerBase : public ComponentBase {
       y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
       float x = 0.f;
       if (content_width_ > viewport_width) {
-        x = static_cast<float>(*selected_x_) + viewport_width / 2.f - 1.f;
+        // Same inclusive-box mirroring as the vertical axis above.
+        x = static_cast<float>(*selected_x_) +
+            static_cast<float>((viewport_width - 1) / 2) + 0.5f;
         x = std::clamp(x / static_cast<float>(content_width_), 0.f, 1.f);
       }
       PublishContentHeight();
