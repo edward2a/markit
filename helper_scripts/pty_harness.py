@@ -6,12 +6,13 @@ Usage:
     ses = Session(doc_path="notes.md", config_text="display:\\n  horizontal: wrap\\n")
     raw = ses.snapshot()            # initial frame bytes
     raw = ses.snapshot(keys=b"jj")  # send keys, wait, capture repaint
-    ch, fg, bold = parse_grid(raw, ses.cols, ses.rows)
+    ch, fg, bold, inv = parse_grid(raw, ses.cols, ses.rows)
     ses.close()
 
 Frames are full-terminal repaints: parse_grid() rebuilds per-cell
-(character, SGR foreground palette code or None, bold flag) grids by
-interpreting cursor addressing (H/f/G), CR/LF, and SGR 'm' sequences.
+(character, SGR foreground palette code or None, bold flag, inverted
+flag) grids by interpreting cursor addressing (H/f/G), CR/LF, and SGR
+'m' sequences.
 Only the LAST write to each cell in the byte stream is kept, so drain
 until the app is idle before trusting a frame (snapshot() settles).
 Lower-level helpers (spawn, drain, send) are exposed for scripts that
@@ -79,7 +80,7 @@ _SGR = re.compile(r"\[([0-9;]*)([A-Za-z])")
 
 
 def parse_grid(data, cols, rows):
-    """Rebuild (chars, fg, bold) cell grids from a raw capture.
+    """Rebuild (chars, fg, bold, inverted) cell grids from a raw capture.
 
     fg holds the SGR palette code (30-37, 90-97) or None for default.
     """
@@ -87,8 +88,9 @@ def parse_grid(data, cols, rows):
     ch = [[" "] * cols for _ in range(rows)]
     fg = [[None] * cols for _ in range(rows)]
     bo = [[False] * cols for _ in range(rows)]
+    inv = [[False] * cols for _ in range(rows)]
     r = c = 0
-    cur_fg, cur_bo = None, False
+    cur_fg, cur_bo, cur_inv = None, False, False
     i = 0
     while i < len(text):
         if text[i] == "\x1b" and i + 1 < len(text) and text[i + 1] == "[":
@@ -102,11 +104,15 @@ def parse_grid(data, cols, rows):
                 for p in params.split(";") if params else ["0"]:
                     n = int(p) if p else 0
                     if n == 0:
-                        cur_fg, cur_bo = None, False
+                        cur_fg, cur_bo, cur_inv = None, False, False
                     elif n == 1:
                         cur_bo = True
+                    elif n == 7:
+                        cur_inv = True
                     elif n == 22:
                         cur_bo = False
+                    elif n == 27:
+                        cur_inv = False
                     elif 30 <= n <= 37 or 90 <= n <= 97:
                         cur_fg = n
                     elif n == 39:
@@ -129,10 +135,11 @@ def parse_grid(data, cols, rows):
             pass
         else:
             if 0 <= r < rows and 0 <= c < cols:
-                ch[r][c], fg[r][c], bo[r][c] = text[i], cur_fg, cur_bo
+                ch[r][c], fg[r][c], bo[r][c], inv[r][c] = \
+                    text[i], cur_fg, cur_bo, cur_inv
             c += 1
         i += 1
-    return ch, fg, bo
+    return ch, fg, bo, inv
 
 
 def row_text(ch_row):

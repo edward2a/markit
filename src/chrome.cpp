@@ -3,6 +3,7 @@
 
 #include <md4c.h>
 
+#include <algorithm>  // for clamp, max
 #include <string>  // for string, to_string
 
 #include <ftxui/screen/color.hpp>  // for Color
@@ -115,17 +116,26 @@ ftxui::Element StatusBar(const std::string& filename, int selected,
          inverted;
 }
 
-ftxui::Element ActionBar() {
+ftxui::Element ActionBar(bool nav_focused) {
   using namespace ftxui;
-  return text("q:quit  w:wrap/scroll  n:nav  j/k+arrows:scroll  "
-              "PgUp/PgDn:page  Home/End:top/bottom  h/l+arrows:pan (scroll)") |
+  return text(nav_focused
+                  ? "Tab:main  Up/Down:move  PgUp/PgDn:page  Home/End:first/"
+                    "last  Enter:goto section"
+                  : "q:quit  w:wrap/scroll  n:nav  Tab:focus  j/k+arrows:"
+                    "scroll  PgUp/PgDn:page  Home/End:top/bottom  h/l+arrows:"
+                    "pan (scroll)") |
          dim;
 }
 
-ftxui::Element NavBar(const std::vector<Heading>& headings, int current) {
+ftxui::Element NavBar(const std::vector<Heading>& headings, int current,
+                      int cursor, bool focused) {
   using namespace ftxui;
   Elements rows;
-  rows.push_back(text("Outline") | bold);
+  Element title = text("Outline") | bold;
+  if (focused) {
+    title = title | inverted;
+  }
+  rows.push_back(title);
   rows.push_back(separator());
   if (headings.empty()) {
     rows.push_back(text("(no headings)") | dim);
@@ -136,12 +146,36 @@ ftxui::Element NavBar(const std::vector<Heading>& headings, int current) {
     if (static_cast<int>(i) == current) {
       // Section in view: bold in the accent color (width-neutral, so the
       // 30-column layout never shifts when the highlight moves).
-      rows.push_back(row | bold | color(Color::Yellow));
+      row = row | bold | color(Color::Yellow);
+    } else if (h.level <= 1) {
+      row = row | bold;
     } else {
-      rows.push_back(h.level <= 1 ? row | bold : row | dim);
+      row = row | dim;
     }
+    if (focused && static_cast<int>(i) == cursor) {
+      // Keyboard cursor: inverted, independent of the view highlight
+      // (also width-neutral). Combines with the accent when both land on
+      // the same row.
+      row = row | inverted;
+    }
+    rows.push_back(row);
   }
   return vbox(std::move(rows)) | size(WIDTH, EQUAL, kNavWidth);
+}
+
+int ClampNavOffset(int offset, int count, int visible) {
+  const int max_offset = std::max(0, count - std::max(1, visible));
+  return std::clamp(offset, 0, max_offset);
+}
+
+int FollowNavOffset(int offset, int cursor, int count, int visible) {
+  const int window = std::max(1, visible);
+  if (cursor < offset) {
+    offset = cursor;
+  } else if (cursor >= offset + window) {
+    offset = cursor - window + 1;
+  }
+  return ClampNavOffset(offset, count, visible);
 }
 
 }  // namespace markit

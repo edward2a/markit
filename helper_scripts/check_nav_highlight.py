@@ -66,7 +66,7 @@ def only_highlighted(ch, fg, bo, name):
 def drive_to(ses, name, max_presses, show, tag):
     """Press j until `name` is the sole nav highlight; return its nav row."""
     for _ in range(max_presses):
-        raw, ch, fg, bo = ses.frame(keys=b"j")
+        raw, ch, fg, bo, _ = ses.frame(keys=b"j")
         row = only_highlighted(ch, fg, bo, name)
         if row is not None:
             if show:
@@ -75,7 +75,7 @@ def drive_to(ses, name, max_presses, show, tag):
                 for r in range(len(ch)):
                     print("%2d|%s" % (r, row_text(ch[r]).rstrip()))
             return row
-    raw, ch, fg, bo = ses.frame()
+    raw, ch, fg, bo, _ = ses.frame()
     if show:
         print("--- frame %s (STUCK) ---" % tag)
         for r in range(len(ch)):
@@ -95,7 +95,7 @@ def main():
     ses = Session(doc, config_text=config, cols=COLS, rows=ROWS)
     try:
         # Home repaints a static screen (the app only draws on events).
-        raw, ch, fg, bo = ses.frame(keys=b"\x1b[H")
+        raw, ch, fg, bo, _ = ses.frame(keys=b"\x1b[H")
         if show:
             print("--- frame home ---")
             for r in range(ROWS):
@@ -114,15 +114,15 @@ def main():
         rb = drive_to(ses, "Beta", 40, show, "beta")
         check("Beta highlighted", rb is not None)
 
-        raw, ch, fg, bo = ses.frame(keys=b"\x1b[F")  # End
+        raw, ch, fg, bo, _ = ses.frame(keys=b"\x1b[F")  # End
         rg = only_highlighted(ch, fg, bo, "Gamma")
         check("Gamma highlighted at End", rg is not None,
               "navrow=%s" % rg)
 
-        raw, ch, _, _ = ses.frame(keys=b"n")
+        raw, ch, _, _, _ = ses.frame(keys=b"n")
         check("nav hidden",
               find_row(ch, "Gamma", NAV_COL) < 0)
-        raw, ch, fg, bo = ses.frame(keys=b"n")
+        raw, ch, fg, bo, _ = ses.frame(keys=b"n")
         rg = only_highlighted(ch, fg, bo, "Gamma")
         check("highlight intact after n toggle", rg is not None)
     finally:

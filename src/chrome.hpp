@@ -34,14 +34,27 @@ std::string FormatPosition(int selected, int max_offset, WrapMode mode);
 ftxui::Element StatusBar(const std::string& filename, int selected,
                          int max_offset, WrapMode mode);
 
-// Row above the status bar: static key-binding hints.
-ftxui::Element ActionBar();
+// Row above the status bar: key-binding hints, switching to the nav set
+// while the nav bar has focus.
+ftxui::Element ActionBar(bool nav_focused = false);
 
 // Right-side full-height panel: "Outline" title + one row per heading.
 // `current` is the index into `headings` of the section in view (-1 for
 // none, e.g. preamble or documents without headings); that row renders
 // bold in the accent color. Out-of-range values highlight nothing.
-ftxui::Element NavBar(const std::vector<Heading>& headings, int current = -1);
+// `cursor` is the keyboard-selected index, rendered inverted only while
+// `focused` is true (independent of `current`); `focused` also inverts
+// the title so the focus is visible.
+ftxui::Element NavBar(const std::vector<Heading>& headings, int current = -1,
+                      int cursor = -1, bool focused = false);
+
+// Clamp a nav list offset (first visible heading) to its valid range for
+// `count` headings with `visible` rows on screen.
+int ClampNavOffset(int offset, int count, int visible);
+
+// Shift `offset` minimally so `cursor` is visible in a `visible`-row
+// window, then clamp. Pure follow-scroll for the nav keyboard cursor.
+int FollowNavOffset(int offset, int cursor, int count, int visible);
 
 }  // namespace markit
 
