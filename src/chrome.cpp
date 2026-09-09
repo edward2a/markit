@@ -5,6 +5,8 @@
 
 #include <string>  // for string, to_string
 
+#include <ftxui/screen/color.hpp>  // for Color
+
 namespace markit {
 
 namespace {
@@ -120,7 +122,7 @@ ftxui::Element ActionBar() {
          dim;
 }
 
-ftxui::Element NavBar(const std::vector<Heading>& headings) {
+ftxui::Element NavBar(const std::vector<Heading>& headings, int current) {
   using namespace ftxui;
   Elements rows;
   rows.push_back(text("Outline") | bold);
@@ -128,9 +130,16 @@ ftxui::Element NavBar(const std::vector<Heading>& headings) {
   if (headings.empty()) {
     rows.push_back(text("(no headings)") | dim);
   }
-  for (const Heading& h : headings) {
+  for (std::size_t i = 0; i < headings.size(); ++i) {
+    const Heading& h = headings[i];
     Element row = text(std::string((h.level - 1) * 2, ' ') + h.text);
-    rows.push_back(h.level <= 1 ? row | bold : row | dim);
+    if (static_cast<int>(i) == current) {
+      // Section in view: bold in the accent color (width-neutral, so the
+      // 30-column layout never shifts when the highlight moves).
+      rows.push_back(row | bold | color(Color::Yellow));
+    } else {
+      rows.push_back(h.level <= 1 ? row | bold : row | dim);
+    }
   }
   return vbox(std::move(rows)) | size(WIDTH, EQUAL, kNavWidth);
 }

@@ -4,8 +4,9 @@
 #include <algorithm>  // for clamp, count_if, max
 #include <cmath>      // for llround
 #include <cstdlib>    // for abs
-#include <optional>   // for optional
+#include <optional>  // for optional
 #include <string>     // for string, to_string
+#include <utility>    // for pair
 #include <vector>     // for vector
 
 #include <ftxui/dom/node.hpp>           // for Render
@@ -430,6 +431,42 @@ int MapTogglePosition(const ftxui::Element& old_tree,
                                  est, old_is_scroll);
   const int pos = (wm.row >= 0) ? wm.row : est;
   return std::clamp(pos + delta, 0, new_max);
+}
+
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const ftxui::Element& tree, const std::vector<Heading>& headings,
+    int width, int viewport_height, bool is_scroll) {
+  std::vector<std::pair<int, int>> located;
+  if (!tree || width < 1 || viewport_height < 1) {
+    return located;
+  }
+  tree->ComputeRequirement();
+  const int min_x = std::max(1, tree->requirement().min_x);
+  const int min_y = std::max(1, tree->requirement().min_y);
+  const std::vector<Row> rows = RenderRows(tree, width, min_y, min_x,
+                                           viewport_height,
+                                           /*may_reflow=*/!is_scroll);
+  if (rows.empty()) {
+    return located;
+  }
+  // Same ordered search as FindHeadingRows, but records the heading index
+  // (into `headings`, i.e. nav rows) so duplicates resolve by rank and
+  // empty-fingerprint headings are skipped without shifting later indices.
+  std::size_t pos = 0;
+  for (std::size_t i = 0; i < headings.size(); ++i) {
+    const std::string fp = Fingerprint(Normalize(headings[i].text));
+    if (fp.empty()) {
+      continue;
+    }
+    for (std::size_t r = pos; r < rows.size(); ++r) {
+      if (rows[r].bold && ContainsWordSeq(rows[r].text, fp)) {
+        located.emplace_back(static_cast<int>(r), static_cast<int>(i));
+        pos = r + 1;
+        break;
+      }
+    }
+  }
+  return located;
 }
 
 }  // namespace markit

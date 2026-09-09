@@ -4,6 +4,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <utility>  // for pair
 #include <vector>
 
 #include <ftxui/component/app.hpp>
@@ -140,6 +141,17 @@ int main(int argc, char** argv) {
   const std::vector<markit::Heading> headings =
       markit::ExtractHeadings(contents);
 
+  // Nav-highlight cache: heading (row, heading-index) pairs for the live
+  // content tree. Locating headings needs an offscreen layout, so it runs
+  // only when the tree, its render width, or the mode changes — never per
+  // frame. The tree pointer is the cache key: `cached_content` is rebuilt
+  // only on mode toggle. `selected` then maps to the last boundary at or
+  // above the top of view (preamble, before the first boundary, is -1).
+  ftxui::Element hl_tree;
+  int hl_width = -1;
+  bool hl_scroll = false;
+  std::vector<std::pair<int, int>> hl_map;
+
   // The chrome takes screen space the content must not use: one separator
   // row + action row + status row vertically, and the nav column (plus its
   // separator) horizontally when visible.
@@ -184,7 +196,29 @@ int main(int argc, char** argv) {
   });
   auto action_bar = Renderer([] { return markit::ActionBar(); });
   auto nav_bar = Renderer([&]() -> Element {
-    return nav_visible ? markit::NavBar(headings) : emptyElement();
+    if (!nav_visible) {
+      return emptyElement();
+    }
+    int current = -1;
+    if (cached_content && viewport_width >= 1 && viewport_height >= 1) {
+      if (!hl_tree || hl_tree.get() != cached_content.get() ||
+          hl_width != viewport_width || hl_scroll != hscroll) {
+        hl_map = markit::LocateHeadingRows(cached_content, headings,
+                                           viewport_width, viewport_height,
+                                           hscroll);
+        hl_tree = cached_content;
+        hl_width = viewport_width;
+        hl_scroll = hscroll;
+      }
+      for (const auto& [row, idx] : hl_map) {
+        if (row <= selected) {
+          current = idx;
+        } else {
+          break;
+        }
+      }
+    }
+    return markit::NavBar(headings, current);
   });
   auto nav_separator = Renderer([&]() -> Element {
     return nav_visible ? separator() : emptyElement();

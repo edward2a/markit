@@ -9,6 +9,7 @@
 #ifndef MARKIT_ANCHOR_HPP
 #define MARKIT_ANCHOR_HPP
 
+#include <utility>  // for pair
 #include <vector>  // for vector
 
 #include <ftxui/dom/elements.hpp>  // for Element
@@ -16,6 +17,17 @@
 #include "chrome.hpp"  // for Heading
 
 namespace markit {
+
+// Locate each heading's row in `tree` rendered at `width`: ordered
+// (row, heading-index) pairs, heading indices into `headings` (nav rows).
+// Same matching as the toggle anchor (bold row containing the heading's
+// fingerprint words, occurrence rank for duplicates, empty fingerprints
+// skipped), so the nav highlight and the toggle agree on sections.
+// `is_scroll` selects the seed the same way MapTogglePosition does
+// (scroll trees never reflow). Empty when the tree is unusable.
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const ftxui::Element& tree, const std::vector<Heading>& headings,
+    int width, int viewport_height, bool is_scroll);
 
 // Map the top-of-view position from one mode's tree to the other's.
 // `old_selected` is the pre-toggle offset, `old_is_scroll` the pre-toggle

@@ -38,7 +38,10 @@ ftxui::Element StatusBar(const std::string& filename, int selected,
 ftxui::Element ActionBar();
 
 // Right-side full-height panel: "Outline" title + one row per heading.
-ftxui::Element NavBar(const std::vector<Heading>& headings);
+// `current` is the index into `headings` of the section in view (-1 for
+// none, e.g. preamble or documents without headings); that row renders
+// bold in the accent color. Out-of-range values highlight nothing.
+ftxui::Element NavBar(const std::vector<Heading>& headings, int current = -1);
 
 }  // namespace markit
 

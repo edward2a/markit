@@ -3,6 +3,7 @@
 
 #include <algorithm>  // for clamp, max
 #include <string>     // for string
+#include <utility>    // for pair
 #include <vector>     // for vector
 
 #include <ftxui/dom/elements.hpp>       // for Element
@@ -607,4 +608,94 @@ TEST(Anchor, NarrowAmbiguousPrefixFallsBackToWide) {
   ASSERT_GE(line2_first, 0);
   EXPECT_GE(mapped, line2_first);
   EXPECT_LE(mapped, line2_last) << "mapped row: '" << new_rows[mapped] << "'";
+}
+
+// Mirrors main.cpp's nav-highlight loop: last boundary at/above selected.
+int CurrentFor(const std::vector<std::pair<int, int>>& map, int selected) {
+  int current = -1;
+  for (const auto& [row, idx] : map) {
+    if (row <= selected) {
+      current = idx;
+    } else {
+      break;
+    }
+  }
+  return current;
+}
+
+// Headings locate in order with nav-row indices; the top of view maps to
+// the section at or above it.
+TEST(Anchor, LocateHeadingRowsFindsSectionsInOrder) {
+  const char* doc = "# Alpha\n\nbody one\n\n## Beta\n\nbody two\n";
+  auto tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const auto headings = markit::ExtractHeadings(doc);
+  ASSERT_EQ(headings.size(), 2u);
+  const auto map =
+      markit::LocateHeadingRows(tree, headings, kWidth, kHeight, true);
+  ASSERT_EQ(map.size(), 2u);
+  EXPECT_EQ(map[0].first, 0);
+  EXPECT_EQ(map[0].second, 0);
+  EXPECT_GT(map[1].first, map[0].first);
+  EXPECT_EQ(map[1].second, 1);
+  EXPECT_EQ(CurrentFor(map, 0), 0) << "heading row highlights its own section";
+  EXPECT_EQ(CurrentFor(map, map[1].first), 1);
+  EXPECT_EQ(CurrentFor(map, map[1].first + 1), 1);
+}
+
+// Preamble rows (above the first heading) map to no section.
+TEST(Anchor, LocateHeadingRowsPreambleMapsToNone) {
+  const char* doc = "preamble text\n\n# Alpha\n\nbody\n";
+  auto tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const auto headings = markit::ExtractHeadings(doc);
+  ASSERT_EQ(headings.size(), 1u);
+  const auto map =
+      markit::LocateHeadingRows(tree, headings, kWidth, kHeight, true);
+  ASSERT_EQ(map.size(), 1u);
+  EXPECT_GT(map[0].first, 0);
+  EXPECT_EQ(CurrentFor(map, 0), -1);
+  EXPECT_EQ(CurrentFor(map, map[0].first), 0);
+}
+
+// Duplicate titles locate by occurrence rank with stable indices.
+TEST(Anchor, LocateHeadingRowsDuplicatesMapByRank) {
+  const char* doc = "# Same\n\none\n\n# Same\n\ntwo\n";
+  auto tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const auto headings = markit::ExtractHeadings(doc);
+  ASSERT_EQ(headings.size(), 2u);
+  const auto map =
+      markit::LocateHeadingRows(tree, headings, kWidth, kHeight, true);
+  ASSERT_EQ(map.size(), 2u);
+  EXPECT_EQ(map[0].second, 0);
+  EXPECT_EQ(map[1].second, 1);
+  EXPECT_GT(map[1].first, map[0].first);
+  EXPECT_EQ(CurrentFor(map, map[0].first), 0);
+  EXPECT_EQ(CurrentFor(map, map[1].first), 1);
+}
+
+// Wrap-mode trees locate too (boundaries are width-dependent there).
+TEST(Anchor, LocateHeadingRowsWorksInWrapMode) {
+  const char* doc = "# Alpha\n\nbody one\n\n## Beta\n\nbody two\n";
+  auto tree = markit::RenderMarkdown(doc, WrapCfg());
+  const auto headings = markit::ExtractHeadings(doc);
+  const auto map =
+      markit::LocateHeadingRows(tree, headings, kWidth, kHeight, false);
+  ASSERT_EQ(map.size(), 2u);
+  EXPECT_EQ(map[0].second, 0);
+  EXPECT_EQ(map[1].second, 1);
+  EXPECT_GT(map[1].first, map[0].first);
+}
+
+// Unusable inputs locate nothing instead of crashing.
+TEST(Anchor, LocateHeadingRowsGuards) {
+  EXPECT_TRUE(
+      markit::LocateHeadingRows(ftxui::Element(), {}, kWidth, kHeight, true)
+          .empty());
+  auto tree = markit::RenderMarkdown("# A\n", ScrollCfg());
+  const auto headings = markit::ExtractHeadings("# A\n");
+  EXPECT_TRUE(markit::LocateHeadingRows(tree, headings, 0, kHeight, true)
+                  .empty());
+  EXPECT_TRUE(markit::LocateHeadingRows(tree, headings, kWidth, 0, true)
+                  .empty());
+  EXPECT_TRUE(markit::LocateHeadingRows(tree, {}, kWidth, kHeight, true)
+                  .empty());
 }
