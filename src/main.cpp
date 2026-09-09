@@ -1,9 +1,13 @@
 #include <algorithm>
+#include <atomic>  // for atomic
+#include <cstdint>  // for uint64_t
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <mutex>  // for mutex
 #include <string>
+#include <thread>  // for thread
 #include <utility>  // for pair
 #include <vector>
 
@@ -163,28 +167,46 @@ int main(int argc, char** argv) {
   bool hl_scroll = false;
   std::vector<std::pair<int, int>> hl_map;
 
-  // Search cache: plain-text rows extracted from the live tree plus the
-  // matching row list for the last compiled query. Rebuilt only when the
-  // tree, its extract width, the query, or the case flag changes — never per
-  // frame. `search_pos` is the index into `search_matches` of the current
-  // match (-1 before the first jump); `search_invalid` flags a query that
-  // failed to compile. An empty query is "search inactive" and matches
-  // nothing (callers never reach the matcher with it).
-  ftxui::Element search_tree;
-  int search_width = -1;
-  int search_w_viewport = -1;  // width inputs, cached so the per-frame cost
-  bool search_w_scroll = false;  // stays at pointer/int compares.
+  // Search state. Rows are plain-text copies of the live tree's visible rows
+  // (indices align 1:1 with scroll offsets); matches is the row list for the
+  // last compiled query; `search_pos` the index of the current match (-1
+  // before the first jump); `search_invalid` flags a query that failed to
+  // compile; `search_pending` flags rows not yet extracted. An empty query
+  // is "search inactive" and matches nothing.
+  //
+  // Row extraction (one full offscreen layout) runs on ONE short-lived
+  // worker thread so it never blocks input. The worker owns its private
+  // tree, rebuilt from the immutable `contents`; the loop shares only
+  // immutable inputs plus the handoff below. The loop side uses try_lock
+  // exclusively and at most one worker runs at a time; stale generations
+  // discard on landing.
+  std::mutex search_mu;
+  struct SearchRows {
+    std::vector<std::string> rows;
+    int viewport = -1;
+    bool scroll = false;
+  };
+  SearchRows search_bg;  // worker handoff, guarded by search_mu.
+  bool search_rows_ready = false;  // guarded by search_mu.
+  std::atomic<uint64_t> search_gen{0};  // generation of the flight/result.
+  std::atomic<bool> search_worker_running{false};
+  std::thread search_worker;
+  uint64_t search_adopted_gen = 0;  // generation currently in search_rows.
+  std::vector<std::string> search_rows;
+  int search_w_viewport = -1;  // inputs the rows were extracted for.
+  bool search_w_scroll = false;
+  bool search_rows_valid = false;
   std::string search_compiled;
   bool search_case = false;
   bool search_invalid = false;
-  std::vector<std::string> search_rows;
+  bool search_pending = false;
   std::vector<int> search_matches;
   int search_pos = -1;
 
   // The chrome takes screen space the content must not use: one separator
-  // row + action row + status row vertically, the search prompt row while it
-  // is open, and the nav column (plus its separator) horizontally when
-  // visible.
+  // row + action row + status row vertically, and the nav column (plus its
+  // separator) horizontally when visible. The search prompt lives in the
+  // action-bar row, so opening it never resizes the viewport.
   constexpr int kChromeRows = 3;
 
   // Building the content tree re-parses the whole document, so cache it and
@@ -197,8 +219,7 @@ int main(int argc, char** argv) {
     const auto term_size = Terminal::Size();
     viewport_width = std::max(
         1, term_size.dimx - (nav_visible ? markit::kNavWidth + 1 : 0));
-    viewport_height =
-        std::max(1, term_size.dimy - kChromeRows - (search_open ? 1 : 0));
+    viewport_height = std::max(1, term_size.dimy - kChromeRows);
     if (!cached_content || rendered_mode != content_cfg.horizontal_wrap) {
       rendered_mode = content_cfg.horizontal_wrap;
       Element fresh = markit::RenderMarkdown(contents, content_cfg);
@@ -270,48 +291,128 @@ int main(int argc, char** argv) {
     log("goto", before, selected);
   };
 
-  // Recompute the search state, split across two caches so typing stays
-  // cheap. Rows depend only on the tree and its extract width (viewport in
-  // wrap, natural width in scroll): re-extracted only when those change.
-  // The offscreen render is the expensive step — width x height cells, so
-  // an uncapped wide render blocks the event loop for seconds — and must
-  // never run per keystroke. Matches depend on the rows plus the query: a
-  // changed query is just a regex re-scan of the cached rows and drops the
-  // match cursor, while a changed tree (e.g. mode toggle) only clamps it.
-  // Matches outlive the prompt: closing it hides the UI but keeps the query
-  // so n/N keep navigating.
+  auto screen = App::Fullscreen();
+
+  // Spawn the extraction worker for the current tree/width, unless one is
+  // already running (its result is adopted or discarded by generation when
+  // it lands). Fire-and-forget: rows don't depend on the query, so typing
+  // never spawns workers — only tree/width changes do. Callers ensure the
+  // viewport is usable.
+  auto spawn_search_worker = [&] {
+    const uint64_t gen = search_gen.load() + 1;
+    search_gen.store(gen);
+    const markit::Config cfg = content_cfg;
+    const std::string& src = contents;
+    const int width =
+        markit::SearchExtractWidth(cached_content, viewport_width, hscroll);
+    const int vw = viewport_width;
+    const bool sc = hscroll;
+    const int hint = std::max(1, content_height);
+    if (search_worker.joinable()) {
+      search_worker.join();  // finished flight only (never a live one).
+    }
+    search_worker_running.store(true);
+    search_worker = std::thread([&, gen, cfg, vw, sc, width, hint] {
+      // Private tree: RenderMarkdown is a pure function of its inputs and
+      // FTXUI renders touch no shared mutable state, so this is race-free
+      // by construction. (The empty-file dim decorator changes style only,
+      // never text, so it is skipped here.)
+      ftxui::Element tree = markit::RenderMarkdown(src, cfg);
+      std::vector<std::string> rows =
+          markit::RenderTextRows(tree, width, hint);
+      {
+        std::lock_guard<std::mutex> lock(search_mu);
+        if (gen == search_gen.load()) {
+          search_bg = SearchRows{std::move(rows), vw, sc};
+          search_rows_ready = true;
+          // Wake the loop: FTXUI renders on demand, so without this the
+          // adoption (and the "..." -> count flip) would wait for the next
+          // keypress. PostEvent is thread-safe; Custom matches no binding
+          // and falls through harmlessly. Stale generations stay silent.
+          screen.PostEvent(Event::Custom);
+        }
+      }
+      search_worker_running.store(false);
+    });
+  };
+
+  // Ensure a rows extraction is coming for the current tree/width: spawn a
+  // worker unless the rows are already valid or one is already running.
+  auto ensure_search_rows = [&] {
+    if (!cached_content || viewport_width < 1 || viewport_height < 1) {
+      return;
+    }
+    if ((!search_rows_valid || search_w_viewport != viewport_width ||
+         search_w_scroll != hscroll) &&
+        !search_worker_running.load()) {
+      spawn_search_worker();
+    }
+  };
+
+  // Recompute the search state. Rows arrive from the worker (adopted without
+  // ever blocking); matches are a regex re-scan of the rows on the loop
+  // (microseconds), so typing never blocks. A changed query drops the match
+  // cursor; a changed tree only clamps it. Matches outlive the prompt:
+  // closing it hides the UI but keeps the query so n/N keep navigating.
   auto refresh_search = [&] {
     if (search_query.empty()) {
-      search_rows.clear();
+      // Inactive: drop matches but keep extracted rows and any flight —
+      // rows don't depend on the query, so reopening is instant.
       search_matches.clear();
       search_pos = -1;
       search_invalid = false;
-      search_tree = ftxui::Element();
-      search_width = -1;
-      search_w_viewport = -1;
+      search_pending = false;
       search_compiled.clear();
       return;
     }
     if (!cached_content || viewport_width < 1 || viewport_height < 1) {
       return;
     }
-    bool rows_changed = false;
-    if (!search_tree || search_tree.get() != cached_content.get() ||
-        search_w_viewport != viewport_width || search_w_scroll != hscroll) {
-      search_width = markit::SearchExtractWidth(cached_content,
-                                                viewport_width, hscroll);
-      search_rows = markit::RenderTextRows(
-          cached_content, search_width, std::max(1, content_height));
-      search_tree = cached_content;
-      search_w_viewport = viewport_width;
-      search_w_scroll = hscroll;
-      rows_changed = true;
+    // Adopt worker rows without ever blocking the loop; a missed adoption
+    // retries next frame.
+    bool rows_rebuilt = false;
+    {
+      std::unique_lock<std::mutex> lock(search_mu, std::try_to_lock);
+      if (lock.owns_lock() && search_rows_ready &&
+          search_adopted_gen != search_gen.load()) {
+        search_rows = std::move(search_bg.rows);
+        search_w_viewport = search_bg.viewport;
+        search_w_scroll = search_bg.scroll;
+        search_rows_ready = false;
+        search_adopted_gen = search_gen.load();
+        search_rows_valid = true;
+        rows_rebuilt = true;
+      }
     }
+    // Rows stale for the current tree/width? The old matches belong to
+    // another layout, so drop them, show pending, and ensure a worker.
+    if (!search_rows_valid || search_w_viewport != viewport_width ||
+        search_w_scroll != hscroll) {
+      search_rows_valid = false;
+      search_matches.clear();
+      ensure_search_rows();
+    }
+    // The matcher compiles on the loop (microseconds): an invalid query
+    // reports even while rows are still pending.
+    markit::Re2Matcher matcher(search_query, config.search_case_sensitive);
+    if (!matcher.ok()) {
+      search_invalid = true;
+      search_pending = false;
+      search_matches.clear();
+      search_pos = -1;
+      search_compiled = search_query;
+      search_case = config.search_case_sensitive;
+      return;
+    }
+    search_invalid = false;
+    if (!search_rows_valid) {
+      search_pending = true;
+      return;
+    }
+    search_pending = false;
     const bool query_changed = (search_compiled != search_query ||
                                 search_case != config.search_case_sensitive);
-    if (rows_changed || query_changed) {
-      markit::Re2Matcher matcher(search_query, config.search_case_sensitive);
-      search_invalid = !matcher.ok();
+    if (rows_rebuilt || query_changed) {
       search_matches = markit::FindMatches(search_rows, matcher);
       search_compiled = search_query;
       search_case = config.search_case_sensitive;
@@ -362,23 +463,30 @@ int main(int argc, char** argv) {
     if (!search_query.empty()) {
       // Persistent match counter: visible while typing and while navigating
       // with n/N after the prompt closed. `/` clears the query (fresh
-      // search), which hides the counter again.
+      // search), which hides the counter again. "..." while the worker rows
+      // are still on their way.
       refresh_search();
-      search_suffix = markit::FormatSearchStatus(
-          search_pos, static_cast<int>(search_matches.size()),
-          search_invalid);
+      if (search_pending) {
+        search_suffix = "...";
+      } else {
+        search_suffix = markit::FormatSearchStatus(
+            search_pos, static_cast<int>(search_matches.size()),
+            search_invalid);
+      }
     }
     return markit::StatusBar(input_file, current, max_offset,
                              content_cfg.horizontal_wrap, search_suffix);
   });
-  auto action_bar = Renderer(
-      [&] { return markit::ActionBar(nav_focused); });
-  // Search prompt row: "/" + live input, visible only while search is open
-  // (Maybe keeps it out of the focus chain when hidden). The Renderer-with-
-  // child pattern preserves Input focus handling inside the row layout.
   auto search_input = Input(&search_query);
-  auto search_bar = Renderer(search_input, [&] {
-    return hbox({text("/ "), search_input->Render() | flex});
+  // The prompt lives in the action-bar row while open: opening/closing never
+  // resizes the viewport, so the scroller never re-lays-out the content for
+  // search chrome. Renderer-with-child keeps Input focus handling.
+  auto action_bar = Renderer(search_input, [&]() -> Element {
+    if (search_open) {
+      return hbox({text("/ "), search_input->Render() | flex,
+                   text("  Enter:jump  Esc:close")});
+    }
+    return markit::ActionBar(nav_focused);
   });
   auto nav_bar = Renderer([&]() -> Element {
     if (!nav_visible) {
@@ -410,7 +518,6 @@ int main(int argc, char** argv) {
   auto left_column = Container::Vertical({
       scroller | flex,
       Renderer([] { return separator(); }),
-      search_bar | Maybe(&search_open),
       action_bar,
       status_bar,
   });
@@ -420,7 +527,6 @@ int main(int argc, char** argv) {
       nav_bar,
   });
 
-  auto screen = App::Fullscreen();
   auto component = CatchEvent(root, [&](Event event) -> bool {
     if (debug.is_open()) {
       debug << "input: " << event.DebugString()
@@ -528,6 +634,9 @@ int main(int argc, char** argv) {
       search_matches.clear();
       search_pos = -1;
       search_input->TakeFocus();
+      // Pre-warm the rows for the current tree on the worker: the first
+      // keystroke then scans instead of extracting.
+      ensure_search_rows();
       return true;
     }
     if (event == Event::Character('w')) {
@@ -572,5 +681,8 @@ int main(int argc, char** argv) {
   });
 
   screen.Loop(component);
+  if (search_worker.joinable()) {
+    search_worker.join();  // reap the extraction worker, if still flying.
+  }
   return EXIT_SUCCESS;
 }
