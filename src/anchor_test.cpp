@@ -699,3 +699,58 @@ TEST(Anchor, LocateHeadingRowsGuards) {
   EXPECT_TRUE(markit::LocateHeadingRows(tree, {}, kWidth, kHeight, true)
                   .empty());
 }
+
+// RenderTextRows exposes the visible text: heading and body rows present,
+// trailing blanks trimmed.
+TEST(Anchor, RenderTextRowsExposesVisibleText) {
+  const char* doc = "# Alpha\n\nbody one\n";
+  auto tree = markit::RenderMarkdown(doc, WrapCfg());
+  const auto rows = markit::RenderTextRows(tree, kWidth, kHeight);
+  ASSERT_FALSE(rows.empty());
+  bool saw_alpha = false, saw_body = false;
+  for (const auto& r : rows) {
+    if (r.find("Alpha") != std::string::npos) {
+      saw_alpha = true;
+    }
+    if (r.find("body one") != std::string::npos) {
+      saw_body = true;
+    }
+  }
+  EXPECT_TRUE(saw_alpha);
+  EXPECT_TRUE(saw_body);
+  // No trailing blank rows: the last row carries text.
+  EXPECT_NE(rows.back().find_first_not_of(' '), std::string::npos);
+}
+
+// A short height hint still yields every row (growth loop backstop).
+TEST(Anchor, RenderTextRowsGrowsPastShortHint) {
+  const char* doc = "# Alpha\n\nbody one\n\nbody two\n\nbody three\n";
+  auto tree = markit::RenderMarkdown(doc, WrapCfg());
+  const auto hinted = markit::RenderTextRows(tree, kWidth, 1);
+  const auto seeded = markit::RenderTextRows(tree, kWidth, 1000);
+  EXPECT_EQ(hinted, seeded);
+}
+
+// Scroll trees never split rows: wide and narrow renders agree on row
+// identity, so search can extract wide (unclipped) with stable indices.
+TEST(Anchor, RenderTextRowsScrollWidthStable) {
+  const char* doc =
+      "# Alpha\n\n"
+      "a very long body line that exceeds the narrow test width by far\n";
+  auto tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const auto narrow = markit::RenderTextRows(tree, kWidth, kHeight);
+  const auto wide = markit::RenderTextRows(tree, 200, kHeight);
+  ASSERT_EQ(narrow.size(), wide.size());
+  for (size_t i = 0; i < narrow.size(); ++i) {
+    // Narrow rows are prefixes of the wide rows (tail clipped, not reflowed).
+    EXPECT_EQ(wide[i].substr(0, narrow[i].size()), narrow[i]);
+  }
+  // The wide render exposes text past the narrow clip point.
+  bool saw_tail = false;
+  for (const auto& r : wide) {
+    if (r.find("by far") != std::string::npos) {
+      saw_tail = true;
+    }
+  }
+  EXPECT_TRUE(saw_tail);
+}

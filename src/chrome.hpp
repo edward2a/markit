@@ -30,9 +30,18 @@ std::vector<Heading> ExtractHeadings(const std::string& markdown);
 // Counts are scroll positions: current = selected+1, total = max_offset+1.
 std::string FormatPosition(int selected, int max_offset, WrapMode mode);
 
+// Pure formatter for the in-document search state shown in the status bar:
+// "invalid pattern" when the query failed to compile, "no matches" when it
+// compiled but matched no row, "N matches" before jumping, "i/N" (1-based)
+// once the cursor sits on a match. Empty when search is inactive.
+std::string FormatSearchStatus(int current, int total, bool invalid);
+
 // Bottom row of the content column: filename (left) + position/mode (right).
+// `search_suffix` (as built by FormatSearchStatus) appends to the right side
+// while search is open; empty keeps the bar unchanged.
 ftxui::Element StatusBar(const std::string& filename, int selected,
-                         int max_offset, WrapMode mode);
+                         int max_offset, WrapMode mode,
+                         const std::string& search_suffix = "");
 
 // Row above the status bar: key-binding hints, switching to the nav set
 // while the nav bar has focus.

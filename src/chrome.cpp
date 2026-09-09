@@ -106,24 +106,42 @@ std::string FormatPosition(int selected, int max_offset, WrapMode mode) {
 }
 
 ftxui::Element StatusBar(const std::string& filename, int selected,
-                         int max_offset, WrapMode mode) {
+                         int max_offset, WrapMode mode,
+                         const std::string& search_suffix) {
   using namespace ftxui;
+  std::string right = FormatPosition(selected, max_offset, mode);
+  if (!search_suffix.empty()) {
+    right += "  " + search_suffix;
+  }
   return hbox({
              text(Basename(filename)),
              text("") | flex,
-             text(FormatPosition(selected, max_offset, mode)),
+             text(right),
          }) |
          inverted;
+}
+
+std::string FormatSearchStatus(int current, int total, bool invalid) {
+  if (invalid) {
+    return "invalid pattern";
+  }
+  if (total <= 0) {
+    return "no matches";
+  }
+  if (current < 0 || current >= total) {
+    return std::to_string(total) + " matches";
+  }
+  return std::to_string(current + 1) + "/" + std::to_string(total);
 }
 
 ftxui::Element ActionBar(bool nav_focused) {
   using namespace ftxui;
   return text(nav_focused
                   ? "Tab:main  Up/Down:move  PgUp/PgDn:page  Home/End:first/"
-                    "last  Enter:goto section"
-                  : "q:quit  w:wrap/scroll  n:nav  Tab:focus  j/k+arrows:"
-                    "scroll  PgUp/PgDn:page  Home/End:top/bottom  h/l+arrows:"
-                    "pan (scroll)") |
+                    "last  Enter:goto section  /:search  n/N:match"
+                  : "q:quit  w:wrap/scroll  Ctrl+N:nav  Tab:focus  /:search  "
+                    "n/N:match  j/k+arrows:scroll  PgUp/PgDn:page  Home/End:"
+                    "top/bottom  h/l+arrows:pan (scroll)") |
          dim;
 }
 

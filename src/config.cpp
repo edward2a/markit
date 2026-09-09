@@ -231,6 +231,49 @@ void ValidateDisplay(const YAML::Node& display, Config& cfg) {
   }
 }
 
+// Validate the top-level `search` mapping against the embedded schema,
+// filling `cfg` with the values found (unset fields keep their defaults). Any
+// unknown key or unparseable value throws std::runtime_error with a dotted
+// path, matching the display validation style.
+void ValidateSearch(const YAML::Node& search, Config& cfg) {
+  static const std::unordered_set<std::string> kKnown = {
+      "case_sensitive",
+  };
+
+  if (!search.IsMap()) {
+    throw std::runtime_error(
+        "config: search: expected a mapping of search settings");
+  }
+
+  for (auto it = search.begin(); it != search.end(); ++it) {
+    if (!it->first.IsScalar()) {
+      throw std::runtime_error("config: search: expected string keys");
+    }
+    const std::string key = it->first.Scalar();
+    const YAML::Node value = it->second;
+
+    if (key == "case_sensitive") {
+      if (!value.IsScalar()) {
+        throw std::runtime_error(
+            "config: search.case_sensitive: expected a boolean (true or "
+            "false)");
+      }
+      const std::string flag = Lowercase(value.Scalar());
+      if (flag == "true") {
+        cfg.search_case_sensitive = true;
+      } else if (flag == "false") {
+        cfg.search_case_sensitive = false;
+      } else {
+        throw std::runtime_error(
+            "config: search.case_sensitive: invalid value '" + value.Scalar() +
+            "' (expected 'true' or 'false')");
+      }
+    } else if (kKnown.count(key) == 0) {
+      throw std::runtime_error("config: search." + key + ": unknown key");
+    }
+  }
+}
+
 }  // namespace
 
 std::optional<ftxui::Color> ParseColor(const std::string& in) {
@@ -297,7 +340,7 @@ Config LoadConfig(const std::string& path) {
       throw std::runtime_error("config: expected string keys at top level");
     }
     const std::string key = it->first.Scalar();
-    if (key != "theme" && key != "display") {
+    if (key != "theme" && key != "display" && key != "search") {
       throw std::runtime_error("config: " + key + ": unknown top-level key");
     }
   }
@@ -307,6 +350,9 @@ Config LoadConfig(const std::string& path) {
   }
   if (root["display"].IsDefined()) {
     ValidateDisplay(root["display"], cfg);
+  }
+  if (root["search"].IsDefined()) {
+    ValidateSearch(root["search"], cfg);
   }
   return cfg;
 }
@@ -358,7 +404,10 @@ void DumpDefaultConfig(std::ostream& out) {
                                   : "wrap")
       << "\n"
       << "  navigation: " << (Config{}.nav_visible ? "visible" : "hidden")
-      << "\n";
+      << "\n"
+      << "search:\n"
+      << "  case_sensitive: "
+      << (Config{}.search_case_sensitive ? "true" : "false") << "\n";
 }
 
 }  // namespace markit

@@ -18,6 +18,7 @@
 #include "config.hpp"
 #include "markdown.hpp"
 #include "scroller.hpp"
+#include "search.hpp"
 
 using namespace ftxui;
 
@@ -137,6 +138,10 @@ int main(int argc, char** argv) {
   bool nav_focused = false;
   int nav_cursor = -1;
   int nav_offset = 0;
+  // In-document search (`/` opens, Esc closes): the query text being typed.
+  // Matches/match cursor live in the search cache below.
+  bool search_open = false;
+  std::string search_query;
   // Pre-measured wrap height from the toggle path: the anchor already renders
   // the new tree at the viewport width, so the scroller can adopt the height
   // instead of measuring again. Width -1 disables.
@@ -158,9 +163,26 @@ int main(int argc, char** argv) {
   bool hl_scroll = false;
   std::vector<std::pair<int, int>> hl_map;
 
+  // Search cache: plain-text rows extracted from the live tree plus the
+  // matching row list for the last compiled query. Rebuilt only when the
+  // tree, its extract width, the query, or the case flag changes — never per
+  // frame. `search_pos` is the index into `search_matches` of the current
+  // match (-1 before the first jump); `search_invalid` flags a query that
+  // failed to compile. An empty query is "search inactive" and matches
+  // nothing (callers never reach the matcher with it).
+  ftxui::Element search_tree;
+  int search_width = -1;
+  std::string search_compiled;
+  bool search_case = false;
+  bool search_invalid = false;
+  std::vector<std::string> search_rows;
+  std::vector<int> search_matches;
+  int search_pos = -1;
+
   // The chrome takes screen space the content must not use: one separator
-  // row + action row + status row vertically, and the nav column (plus its
-  // separator) horizontally when visible.
+  // row + action row + status row vertically, the search prompt row while it
+  // is open, and the nav column (plus its separator) horizontally when
+  // visible.
   constexpr int kChromeRows = 3;
 
   // Building the content tree re-parses the whole document, so cache it and
@@ -173,7 +195,8 @@ int main(int argc, char** argv) {
     const auto term_size = Terminal::Size();
     viewport_width = std::max(
         1, term_size.dimx - (nav_visible ? markit::kNavWidth + 1 : 0));
-    viewport_height = std::max(1, term_size.dimy - kChromeRows);
+    viewport_height =
+        std::max(1, term_size.dimy - kChromeRows - (search_open ? 1 : 0));
     if (!cached_content || rendered_mode != content_cfg.horizontal_wrap) {
       rendered_mode = content_cfg.horizontal_wrap;
       Element fresh = markit::RenderMarkdown(contents, content_cfg);
@@ -245,14 +268,100 @@ int main(int argc, char** argv) {
     log("goto", before, selected);
   };
 
+  // Recompute the search match list when the tree, its extract width, the
+  // query, or the case flag changed. Wrap trees extract at the viewport
+  // width (what the user sees); scroll trees extract wide (rows never split
+  // there, so indices stay aligned while clipped text becomes searchable).
+  // Matches outlive the prompt: closing it hides the UI but keeps the query
+  // so n/N keep navigating. A changed query drops the match cursor; a
+  // changed tree only clamps it.
+  auto refresh_search = [&] {
+    if (search_query.empty()) {
+      search_matches.clear();
+      search_pos = -1;
+      search_invalid = false;
+      return;
+    }
+    const int width = hscroll ? 8192 : viewport_width;
+    const bool query_changed = (search_compiled != search_query ||
+                                search_case != config.search_case_sensitive);
+    if (cached_content && viewport_width >= 1 && viewport_height >= 1 &&
+        (!search_tree || search_tree.get() != cached_content.get() ||
+         search_width != width || query_changed)) {
+      search_rows = markit::RenderTextRows(
+          cached_content, width, std::max(1, content_height));
+      markit::Re2Matcher matcher(search_query, config.search_case_sensitive);
+      search_invalid = !matcher.ok();
+      search_matches = markit::FindMatches(search_rows, matcher);
+      search_tree = cached_content;
+      search_width = width;
+      search_compiled = search_query;
+      search_case = config.search_case_sensitive;
+      if (query_changed) {
+        search_pos = -1;
+      } else {
+        search_pos = std::clamp(search_pos, -1,
+                                static_cast<int>(search_matches.size()) - 1);
+      }
+    }
+  };
+
+  // Jump to the next (dir > 0) or previous (dir < 0) match, wrapping around.
+  // The first jump after a query change lands on the first match at or below
+  // (above, for dir < 0) the top of view: NextMatch is strict, so the seed
+  // is offset by one row to make the first jump inclusive.
+  auto goto_match = [&](int dir) {
+    refresh_search();
+    if (search_matches.empty()) {
+      return;
+    }
+    const int count = static_cast<int>(search_matches.size());
+    int row = search_matches.front();
+    if (search_pos < 0 || search_pos >= count) {
+      row = markit::NextMatch(search_matches,
+                              dir > 0 ? selected - 1 : selected + 1, dir);
+      for (int i = 0; i < count; ++i) {
+        if (search_matches[i] == row) {
+          search_pos = i;
+          break;
+        }
+      }
+    } else {
+      search_pos = (search_pos + dir + count) % count;
+      row = search_matches[search_pos];
+    }
+    const int before = selected;
+    selected = row;
+    selected_x = 0;
+    clamp_selected();
+    log("search", before, selected);
+  };
+
   auto status_bar = Renderer([&] {
     const int max_offset = std::max(0, content_height - viewport_height);
     const int current = std::clamp(selected, 0, max_offset);
+    std::string search_suffix;
+    if (!search_query.empty()) {
+      // Persistent match counter: visible while typing and while navigating
+      // with n/N after the prompt closed. `/` clears the query (fresh
+      // search), which hides the counter again.
+      refresh_search();
+      search_suffix = markit::FormatSearchStatus(
+          search_pos, static_cast<int>(search_matches.size()),
+          search_invalid);
+    }
     return markit::StatusBar(input_file, current, max_offset,
-                             content_cfg.horizontal_wrap);
+                             content_cfg.horizontal_wrap, search_suffix);
   });
   auto action_bar = Renderer(
       [&] { return markit::ActionBar(nav_focused); });
+  // Search prompt row: "/" + live input, visible only while search is open
+  // (Maybe keeps it out of the focus chain when hidden). The Renderer-with-
+  // child pattern preserves Input focus handling inside the row layout.
+  auto search_input = Input(&search_query);
+  auto search_bar = Renderer(search_input, [&] {
+    return hbox({text("/ "), search_input->Render() | flex});
+  });
   auto nav_bar = Renderer([&]() -> Element {
     if (!nav_visible) {
       return emptyElement();
@@ -283,6 +392,7 @@ int main(int argc, char** argv) {
   auto left_column = Container::Vertical({
       scroller | flex,
       Renderer([] { return separator(); }),
+      search_bar | Maybe(&search_open),
       action_bar,
       status_bar,
   });
@@ -300,6 +410,14 @@ int main(int argc, char** argv) {
       debug.flush();
     }
 
+    if (search_open && event == Event::Escape) {
+      // Esc closes the prompt first (before the global quit below). The
+      // query and matches are retained so n/N keep navigating; focus goes
+      // back to the content. `/` starts fresh.
+      search_open = false;
+      scroller->TakeFocus();
+      return true;
+    }
     if (event == Event::q || event == Event::Escape || event == Event::CtrlC) {
       screen.Exit();
       return true;
@@ -365,6 +483,35 @@ int main(int argc, char** argv) {
         return true;
       }
     }
+    if (search_open) {
+      // While the prompt is open, Enter accepts the query: jump to the next
+      // match and close the prompt (n/N keep navigating from there).
+      // Esc cancels without jumping. Every other key (including n/N and /)
+      // falls through to the Input as text.
+      if (event == Event::Return) {
+        goto_match(+1);
+        search_open = false;
+        scroller->TakeFocus();
+        return true;
+      }
+      return false;
+    }
+    if (event == Event::Character('n')) {
+      goto_match(+1);  // no-op without an active search.
+      return true;
+    }
+    if (event == Event::Character('N')) {
+      goto_match(-1);  // no-op without an active search.
+      return true;
+    }
+    if (event == Event::Character('/')) {
+      search_open = true;
+      search_query.clear();
+      search_matches.clear();
+      search_pos = -1;
+      search_input->TakeFocus();
+      return true;
+    }
     if (event == Event::Character('w')) {
       const bool old_is_scroll = hscroll;
       Element old_tree = cached_content;
@@ -394,7 +541,7 @@ int main(int argc, char** argv) {
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
-    if (event == Event::Character('n')) {
+    if (event == Event::CtrlN) {
       nav_visible = !nav_visible;
       if (!nav_visible) {
         nav_focused = false;  // focus cannot stay in a hidden nav.

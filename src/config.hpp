@@ -36,6 +36,9 @@ struct Config {
   WrapMode horizontal_wrap = WrapMode::Wrap;
   // Navigation bar (right side) default visibility; toggled live with `n`.
   bool nav_visible = true;
+  // In-document search (`/`): case-sensitive matching when true, folding
+  // ASCII case otherwise.
+  bool search_case_sensitive = false;
 };
 
 // Parse a color string: a named FTXUI Palette16 color (case-insensitive) or a

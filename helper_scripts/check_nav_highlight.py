@@ -119,12 +119,12 @@ def main():
         check("Gamma highlighted at End", rg is not None,
               "navrow=%s" % rg)
 
-        raw, ch, _, _, _ = ses.frame(keys=b"n")
+        raw, ch, _, _, _ = ses.frame(keys=b"\x0e")  # Ctrl+N hides
         check("nav hidden",
               find_row(ch, "Gamma", NAV_COL) < 0)
-        raw, ch, fg, bo, _ = ses.frame(keys=b"n")
+        raw, ch, fg, bo, _ = ses.frame(keys=b"\x0e")  # Ctrl+N restores
         rg = only_highlighted(ch, fg, bo, "Gamma")
-        check("highlight intact after n toggle", rg is not None)
+        check("highlight intact after Ctrl+N toggle", rg is not None)
     finally:
         ses.close()
         os.unlink(doc)

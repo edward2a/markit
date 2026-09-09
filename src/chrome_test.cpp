@@ -148,13 +148,42 @@ TEST(Chrome, StatusBarShowsFilePositionAndMode) {
   EXPECT_TRUE(AnyLineContains(rows, "scroll"));
 }
 
+// The search state formatter covers every status-bar state.
+TEST(Chrome, FormatSearchStatusStates) {
+  EXPECT_EQ(markit::FormatSearchStatus(-1, 0, true), "invalid pattern");
+  EXPECT_EQ(markit::FormatSearchStatus(-1, 0, false), "no matches");
+  EXPECT_EQ(markit::FormatSearchStatus(-1, 7, false), "7 matches");
+  EXPECT_EQ(markit::FormatSearchStatus(9, 7, false), "7 matches");
+  EXPECT_EQ(markit::FormatSearchStatus(0, 7, false), "1/7");
+  EXPECT_EQ(markit::FormatSearchStatus(6, 7, false), "7/7");
+}
+
+// The status bar appends the search suffix while search is open, and is
+// unchanged when it is empty.
+TEST(Chrome, StatusBarAppendsSearchSuffix) {
+  const auto with =
+      RenderToStrings(markit::StatusBar("/a/b/notes.md", 0, 9,
+                                        markit::WrapMode::Wrap, "2/7"),
+                      60, 1);
+  ASSERT_EQ(with.size(), 1u);
+  EXPECT_TRUE(AnyLineContains(with, "2/7"));
+  const auto without =
+      RenderToStrings(markit::StatusBar("/a/b/notes.md", 0, 9,
+                                        markit::WrapMode::Wrap),
+                      60, 1);
+  ASSERT_EQ(without.size(), 1u);
+  EXPECT_FALSE(AnyLineContains(without, "matches"));
+}
+
 // The action bar is a non-empty single row naming the main keys.
 TEST(Chrome, ActionBarListsKeys) {
   const auto rows = RenderToStrings(markit::ActionBar(), 100, 1);
   ASSERT_EQ(rows.size(), 1u);
   EXPECT_TRUE(AnyLineContains(rows, "q:quit"));
   EXPECT_TRUE(AnyLineContains(rows, "w:wrap/scroll"));
-  EXPECT_TRUE(AnyLineContains(rows, "n:nav"));
+  EXPECT_TRUE(AnyLineContains(rows, "Ctrl+N:nav"));
+  EXPECT_TRUE(AnyLineContains(rows, "/:search"));
+  EXPECT_TRUE(AnyLineContains(rows, "n/N:match"));
 }
 
 // The nav bar lists the headings under an "Outline" title.

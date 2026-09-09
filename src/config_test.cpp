@@ -151,6 +151,39 @@ TEST(Config, LoadConfig_NavigationInvalidValueThrows) {
   std::remove(path.c_str());
 }
 
+// Search is case-insensitive by default and survives load.
+TEST(Config, LoadConfig_DefaultSearchCaseInsensitive) {
+  EXPECT_FALSE(markit::LoadConfig("").search_case_sensitive);
+  const markit::Config cfg = markit::LoadConfig("/nonexistent/markit-missing.yml");
+  EXPECT_FALSE(cfg.search_case_sensitive);
+}
+
+TEST(Config, LoadConfig_SearchCaseSensitiveExplicit) {
+  const std::string path = TempYaml("search:\n  case_sensitive: true\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_TRUE(cfg.search_case_sensitive);
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);  // display untouched
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_SearchCaseInsensitiveExplicit) {
+  const std::string path = TempYaml("search:\n  case_sensitive: false\n");
+  EXPECT_FALSE(markit::LoadConfig(path).search_case_sensitive);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_SearchInvalidValueThrows) {
+  const std::string path = TempYaml("search:\n  case_sensitive: maybe\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_SearchUnknownKeyThrows) {
+  const std::string path = TempYaml("search:\n  smart_case: true\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
 TEST(Config, LoadConfig_UnknownTopLevelSectionThrows) {
   const std::string path = TempYaml("sidebar:\n  width: 30\n");
   EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
