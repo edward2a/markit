@@ -2,6 +2,7 @@
 #include "chrome.hpp"
 
 #include <string>  // for string
+#include <utility>  // for pair
 #include <vector>  // for vector
 
 #include <ftxui/dom/elements.hpp>  // for Element
@@ -380,4 +381,76 @@ TEST(Chrome, ActionBarFocusHints) {
   EXPECT_TRUE(AnyLineContains(rows, "Tab:main"));
   const auto plain = RenderToStrings(markit::ActionBar(), 120, 1);
   EXPECT_TRUE(AnyLineContains(plain, "Tab:focus"));
+}
+
+// Render through SearchHighlight and return the screen for style checks.
+ftxui::Screen RenderHighlight(ftxui::Element element, const int* row,
+                              const std::vector<std::pair<int, int>>* spans,
+                              int width, int height) {
+  ftxui::Screen screen =
+      ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                            ftxui::Dimension::Fixed(height));
+  ftxui::Render(
+      screen, markit::SearchHighlight(std::move(element), row, spans));
+  return screen;
+}
+
+// Only the span cells invert; the rest of the row is untouched.
+TEST(Chrome, SearchHighlightInvertsSpanCellsOnly) {
+  const int row = 0;
+  const std::vector<std::pair<int, int>> spans = {{6, 11}};
+  ftxui::Screen screen =
+      RenderHighlight(ftxui::text("hello world"), &row, &spans, 20, 1);
+  for (int x = 0; x < 20; ++x) {
+    EXPECT_EQ(screen.CellAt(x, 0).inverted, x >= 6 && x < 11) << "x=" << x;
+  }
+}
+
+// The mark lands on the targeted content row, not the first row.
+TEST(Chrome, SearchHighlightTargetsGivenRow) {
+  using ftxui::text;
+  const int row = 1;
+  const std::vector<std::pair<int, int>> spans = {{0, 3}};
+  ftxui::Screen screen = RenderHighlight(
+      ftxui::vbox({text("alpha"), text("beta")}), &row, &spans, 10, 2);
+  EXPECT_FALSE(screen.CellAt(0, 0).inverted);
+  for (int x = 0; x < 3; ++x) {
+    EXPECT_TRUE(screen.CellAt(x, 1).inverted) << "x=" << x;
+  }
+  EXPECT_FALSE(screen.CellAt(3, 1).inverted);
+}
+
+// Inactive inputs render the child untouched: null row, negative row,
+// out-of-range row, and empty spans.
+TEST(Chrome, SearchHighlightInactiveRendersUntouched) {
+  const std::vector<std::pair<int, int>> spans = {{0, 5}};
+  const std::vector<std::pair<int, int>> empty;
+  const int neg = -1;
+  const int far = 7;
+  const int row = 0;
+  const int* rows[] = {nullptr, &neg, &far, &row};
+  const std::vector<std::pair<int, int>>* span_sets[] = {&spans, &spans,
+                                                         &spans, &empty};
+  for (int i = 0; i < 4; ++i) {
+    ftxui::Screen screen = RenderHighlight(ftxui::text("hello"), rows[i],
+                                           span_sets[i], 10, 1);
+    for (int x = 0; x < 10; ++x) {
+      EXPECT_FALSE(screen.CellAt(x, 0).inverted) << "case=" << i << " x=" << x;
+    }
+  }
+}
+
+// Byte spans map across multi-byte graphemes: "a" + é + "b", so the é
+// span [1,3) inverts exactly the middle cell. (Adjacent literals: \xA9
+// would swallow the "b" into the hex escape.)
+TEST(Chrome, SearchHighlightMultibyteSpan) {
+  const int row = 0;
+  const std::vector<std::pair<int, int>> spans = {{1, 3}};
+  ftxui::Screen screen =
+      RenderHighlight(ftxui::text("a\xC3\xA9"
+                                  "b"),
+                      &row, &spans, 10, 1);
+  EXPECT_FALSE(screen.CellAt(0, 0).inverted);
+  EXPECT_TRUE(screen.CellAt(1, 0).inverted);
+  EXPECT_FALSE(screen.CellAt(2, 0).inverted);
 }

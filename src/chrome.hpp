@@ -57,6 +57,17 @@ ftxui::Element ActionBar(bool nav_focused = false);
 ftxui::Element NavBar(const std::vector<Heading>& headings, int current = -1,
                       int cursor = -1, bool focused = false);
 
+// In-document search mark: renders `child` unchanged, then inverts the cells
+// covered by `spans` (byte ranges into the row's text) on content row `*row`.
+// Coordinates are content rows: the node sits inside the scroller, so the
+// frame clips out-of-view cells through the screen stencil. A null row, a
+// negative row, or empty spans render the child untouched (search inactive).
+// The spans come from the same offscreen layout the search rows are
+// extracted with, so they land on the visual row the status counter names.
+ftxui::Element SearchHighlight(
+    ftxui::Element child, const int* row,
+    const std::vector<std::pair<int, int>>* spans);
+
 // Clamp a nav list offset (first visible heading) to its valid range for
 // `count` headings with `visible` rows on screen.
 int ClampNavOffset(int offset, int count, int visible);

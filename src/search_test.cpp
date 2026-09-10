@@ -126,5 +126,58 @@ TEST(Re2Matcher, EmptyPatternIsOk) {
   EXPECT_TRUE(m.ok());
 }
 
+TEST(Re2Matcher, FindSpansReportsByteSpans) {
+  Re2Matcher m("needle");
+  EXPECT_EQ(m.FindSpans("a needle here, needle!"),
+            (std::vector<std::pair<int, int>>{{2, 8}, {15, 21}}));
+}
+
+TEST(Re2Matcher, FindSpansEmptyWhenNoMatch) {
+  Re2Matcher m("needle");
+  EXPECT_TRUE(m.FindSpans("nothing here").empty());
+}
+
+TEST(Re2Matcher, FindSpansEmptyWhenInvalid) {
+  Re2Matcher m("([");
+  EXPECT_FALSE(m.ok());
+  EXPECT_TRUE(m.FindSpans("([ anything").empty());
+}
+
+TEST(Re2Matcher, FindSpansCaseInsensitive) {
+  Re2Matcher m("ab");
+  EXPECT_EQ(m.FindSpans("xABx"), (std::vector<std::pair<int, int>>{{1, 3}}));
+}
+
+TEST(Re2Matcher, FindSpansCoverWholeMatch) {
+  Re2Matcher m("err.*timeout");
+  EXPECT_EQ(m.FindSpans("error: connection timeout!"),
+            (std::vector<std::pair<int, int>>{{0, 25}}));
+}
+
+TEST(Re2Matcher, FindSpansWholeMatchDespiteCaptures) {
+  // never_capture rewrites (...) groups; the overall span must survive.
+  Re2Matcher m("(a)(b)");
+  EXPECT_EQ(m.FindSpans("xxabyy"), (std::vector<std::pair<int, int>>{{2, 4}}));
+}
+
+TEST(Re2Matcher, FindSpansAnchored) {
+  Re2Matcher m("^# ");
+  EXPECT_EQ(m.FindSpans("# Title"), (std::vector<std::pair<int, int>>{{0, 2}}));
+}
+
+TEST(Re2Matcher, FindSpansSkipsEmptyMatches) {
+  // "a*" matches empty at every position: no spans, and the walk must
+  // still terminate (this test returning proves it).
+  Re2Matcher m("a*");
+  EXPECT_TRUE(m.Matches("bbb"));
+  EXPECT_TRUE(m.FindSpans("bbb").empty());
+  EXPECT_TRUE(m.FindSpans("").empty());
+}
+
+TEST(Matcher, FindSpansDefaultsToEmpty) {
+  // Fakes that only override Matches() report no spans.
+  EXPECT_TRUE(FakeMatcher({"needle"}).FindSpans("a needle here").empty());
+}
+
 }  // namespace
 }  // namespace markit

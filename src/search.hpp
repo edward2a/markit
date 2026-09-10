@@ -22,6 +22,15 @@ class Matcher {
   // False when the pattern failed to compile (callers show "invalid pattern"
   // and treat the query as matching nothing).
   virtual bool ok() const = 0;
+  // Byte spans [start, end) of each non-empty match in the row, ascending
+  // and non-overlapping. Empty when the pattern is invalid or matches
+  // nothing (patterns matching empty strings contribute no spans). Used to
+  // mark the current match in the live view; the default reports none so
+  // test fakes only override what they exercise.
+  virtual std::vector<std::pair<int, int>> FindSpans(
+      const std::string& row) const {
+    return {};
+  }
 };
 
 // RE2-backed matcher, compiled once per query revision. `case_sensitive`
@@ -33,6 +42,8 @@ class Re2Matcher : public Matcher {
   ~Re2Matcher() override;  // out-of-line: Impl is complete only in search.cpp.
   bool Matches(const std::string& row) const override;
   bool ok() const override;
+  std::vector<std::pair<int, int>> FindSpans(
+      const std::string& row) const override;
 
  private:
   struct Impl;
