@@ -298,7 +298,7 @@ int main(int argc, char** argv) {
       Scroller(std::move(content), &selected, &viewport_height,
                [&](int before, int after) { log("scroll", before, after); },
                &selected_x, &viewport_width, &hscroll, &content_height,
-               &wrap_hint_w, &wrap_hint_h);
+               &wrap_hint_w, &wrap_hint_h, &config.keybindings);
 
   auto clamp_selected = [&] {
     const int max_offset = std::max(0, content_height - viewport_height);
@@ -606,6 +606,10 @@ int main(int argc, char** argv) {
       nav_bar,
   });
 
+  // All keys below come from the `keybindings:` config section (defaults
+  // preserve the historical mappings). Structural order is the precedence:
+  // search_cancel before quit, nav keys before the prompt/content fallthrough.
+  const markit::KeyBindings& kb = config.keybindings;
   auto component = CatchEvent(root, [&](Event event) -> bool {
     if (debug.is_open()) {
       debug << "input: " << event.DebugString()
@@ -613,7 +617,7 @@ int main(int argc, char** argv) {
       debug.flush();
     }
 
-    if (search_open && event == Event::Escape) {
+    if (search_open && markit::MatchesKey(event, kb.search_cancel)) {
       // Esc closes the prompt first (before the global quit below). The
       // query and matches are retained so n/N keep navigating; focus goes
       // back to the content. `/` starts fresh.
@@ -621,11 +625,11 @@ int main(int argc, char** argv) {
       scroller->TakeFocus();
       return true;
     }
-    if (event == Event::q || event == Event::Escape || event == Event::CtrlC) {
+    if (markit::MatchesKey(event, kb.quit)) {
       screen.Exit();
       return true;
     }
-    if (event == Event::Tab) {
+    if (markit::MatchesKey(event, kb.focus_switch)) {
       // Tab is the only focus switch: main view <-> nav bar. No-op when
       // the nav is hidden or the document has no headings.
       if (nav_visible && !headings.empty()) {
@@ -651,38 +655,40 @@ int main(int argc, char** argv) {
         nav_offset = markit::FollowNavOffset(nav_offset, nav_cursor, count,
                                              visible);
       };
-      if (event == Event::ArrowUp || event == Event::Character('k')) {
+      if (markit::MatchesKey(event, kb.nav_up)) {
         nav_cursor = std::max(0, nav_cursor - 1);
         follow();
         return true;
       }
-      if (event == Event::ArrowDown || event == Event::Character('j')) {
+      if (markit::MatchesKey(event, kb.nav_down)) {
         nav_cursor = std::min(count - 1, nav_cursor + 1);
         follow();
         return true;
       }
-      if (event == Event::Home) {
+      if (markit::MatchesKey(event, kb.nav_top)) {
         nav_cursor = 0;
         follow();
         return true;
       }
-      if (event == Event::End) {
+      if (markit::MatchesKey(event, kb.nav_bottom)) {
         nav_cursor = count - 1;
         follow();
         return true;
       }
-      if (event == Event::PageUp) {
+      if (markit::MatchesKey(event, kb.nav_page_up)) {
         nav_cursor = std::max(0, nav_cursor - visible);
         follow();
         return true;
       }
-      if (event == Event::PageDown ||
-          (!search_open && event == Event::Character(' '))) {
+      // Space still types into the search prompt while it is open, so the
+      // nav page-down binding skips a literal space in that state.
+      if (markit::MatchesKey(event, kb.nav_page_down) &&
+          !(search_open && event == Event::Character(' '))) {
         nav_cursor = std::min(count - 1, nav_cursor + visible);
         follow();
         return true;
       }
-      if (event == Event::Return) {
+      if (markit::MatchesKey(event, kb.nav_activate)) {
         jump_to_heading(nav_cursor);
         return true;
       }
@@ -692,7 +698,7 @@ int main(int argc, char** argv) {
       // match and close the prompt (n/N keep navigating from there).
       // Esc cancels without jumping. Every other key (including n/N and /)
       // falls through to the Input as text.
-      if (event == Event::Return) {
+      if (markit::MatchesKey(event, kb.search_accept)) {
         goto_match(+1);
         search_open = false;
         scroller->TakeFocus();
@@ -700,15 +706,15 @@ int main(int argc, char** argv) {
       }
       return false;
     }
-    if (event == Event::Character('n')) {
+    if (markit::MatchesKey(event, kb.search_next)) {
       goto_match(+1);  // no-op without an active search.
       return true;
     }
-    if (event == Event::Character('N')) {
+    if (markit::MatchesKey(event, kb.search_prev)) {
       goto_match(-1);  // no-op without an active search.
       return true;
     }
-    if (event == Event::Character('/')) {
+    if (markit::MatchesKey(event, kb.search_open)) {
       search_open = true;
       search_query.clear();
       search_matches.clear();
@@ -719,7 +725,7 @@ int main(int argc, char** argv) {
       ensure_search_rows();
       return true;
     }
-    if (event == Event::Character('w')) {
+    if (markit::MatchesKey(event, kb.toggle_wrap)) {
       const bool old_is_scroll = hscroll;
       Element old_tree = cached_content;
       hscroll = !hscroll;
@@ -748,7 +754,7 @@ int main(int argc, char** argv) {
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
-    if (event == Event::CtrlN) {
+    if (markit::MatchesKey(event, kb.toggle_nav)) {
       nav_visible = !nav_visible;
       if (!nav_visible) {
         nav_focused = false;  // focus cannot stay in a hidden nav.

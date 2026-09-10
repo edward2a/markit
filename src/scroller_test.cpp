@@ -526,3 +526,47 @@ TEST(Scroller, WrapHintIgnoredOnWidthMismatch) {
   EXPECT_EQ(content_height, 60);
   EXPECT_EQ(hint_w, kWidth + 1);
 }
+
+// Wrap a child in a Scroller driven by explicit key bindings.
+ftxui::Component BoundScroller(ftxui::Component child, int* selected,
+                               int* viewport, const markit::KeyBindings* kb) {
+  return ftxui::Scroller(std::move(child), selected, viewport,
+                         [](int, int) {}, 0, kWidth, false, nullptr, -1, -1,
+                         kb);
+}
+
+// Custom bindings replace the defaults: the remapped keys scroll and the old
+// ones stop (j is unbound once scroll_down moves to x).
+TEST(Scroller, CustomBindingsHonored) {
+  int selected = 0;
+  int viewport = kHeight;
+  markit::KeyBindings kb;
+  kb.scroll_down = {ftxui::Event::Character('x')};
+  kb.scroll_up = {ftxui::Event::Character('y')};
+  auto scroller = BoundScroller(MakeLines(60), &selected, &viewport, &kb);
+  Prime(scroller);
+
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::Character('j')));
+  EXPECT_EQ(selected, 0);
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Character('x')));
+  EXPECT_EQ(selected, 1);
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Character('y')));
+  EXPECT_EQ(selected, 0);
+}
+
+// An explicit default-constructed KeyBindings behaves exactly like the
+// implicit (nullptr) defaults.
+TEST(Scroller, ExplicitDefaultBindingsMatchImplicit) {
+  const markit::KeyBindings kb;
+  const markit::KeyBindings* variants[] = {&kb, nullptr};
+  for (const markit::KeyBindings* ptr : variants) {
+    int selected = 0;
+    int viewport = kHeight;
+    auto scroller = BoundScroller(MakeLines(60), &selected, &viewport, ptr);
+    Prime(scroller);
+    ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Character('j')));
+    EXPECT_EQ(selected, 1);
+    ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Character(' ')));
+    EXPECT_EQ(selected, 1 + (kHeight - 1));
+  }
+}

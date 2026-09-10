@@ -350,4 +350,222 @@ TEST(Config, LoadConfig_NonScalarKeyThrows) {
   std::remove(nested.c_str());
 }
 
+// A default-constructed KeyBindings preserves the historical hardcoded
+// mappings (spot-checked across all four areas).
+TEST(Config, KeyBindings_DefaultsMatchHistoricalMappings) {
+  const markit::KeyBindings kb;
+  EXPECT_EQ(kb.scroll_up,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowUp,
+                                       ftxui::Event::Character('k')}));
+  EXPECT_EQ(kb.scroll_down,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowDown,
+                                       ftxui::Event::Character('j')}));
+  EXPECT_EQ(kb.page_up, (std::vector<ftxui::Event>{ftxui::Event::PageUp}));
+  EXPECT_EQ(kb.page_down,
+            (std::vector<ftxui::Event>{ftxui::Event::PageDown,
+                                       ftxui::Event::Character(' ')}));
+  EXPECT_EQ(kb.goto_top, (std::vector<ftxui::Event>{ftxui::Event::Home}));
+  EXPECT_EQ(kb.goto_bottom, (std::vector<ftxui::Event>{ftxui::Event::End}));
+  EXPECT_EQ(kb.pan_left,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowLeft,
+                                       ftxui::Event::Character('h')}));
+  EXPECT_EQ(kb.pan_right,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowRight,
+                                       ftxui::Event::Character('l')}));
+  EXPECT_EQ(kb.search_open,
+            (std::vector<ftxui::Event>{ftxui::Event::Character('/')}));
+  EXPECT_EQ(kb.search_next,
+            (std::vector<ftxui::Event>{ftxui::Event::Character('n')}));
+  EXPECT_EQ(kb.search_prev,
+            (std::vector<ftxui::Event>{ftxui::Event::Character('N')}));
+  EXPECT_EQ(kb.search_accept,
+            (std::vector<ftxui::Event>{ftxui::Event::Return}));
+  EXPECT_EQ(kb.search_cancel,
+            (std::vector<ftxui::Event>{ftxui::Event::Escape}));
+  EXPECT_EQ(kb.quit, (std::vector<ftxui::Event>{ftxui::Event::Character('q'),
+                                                ftxui::Event::Escape,
+                                                ftxui::Event::CtrlC}));
+  EXPECT_EQ(kb.focus_switch, (std::vector<ftxui::Event>{ftxui::Event::Tab}));
+  EXPECT_EQ(kb.toggle_wrap,
+            (std::vector<ftxui::Event>{ftxui::Event::Character('w')}));
+  EXPECT_EQ(kb.toggle_nav, (std::vector<ftxui::Event>{ftxui::Event::CtrlN}));
+  EXPECT_EQ(kb.nav_up, kb.scroll_up);
+  EXPECT_EQ(kb.nav_down, kb.scroll_down);
+  EXPECT_EQ(kb.nav_page_up, kb.page_up);
+  EXPECT_EQ(kb.nav_page_down, kb.page_down);
+  EXPECT_EQ(kb.nav_top, kb.goto_top);
+  EXPECT_EQ(kb.nav_bottom, kb.goto_bottom);
+  EXPECT_EQ(kb.nav_activate, kb.search_accept);
+}
+
+// Specifying an action replaces its whole default list; the rest keeps
+// defaults and other sections are untouched.
+TEST(Config, LoadConfig_KeybindingsOverrideReplacesList) {
+  const std::string path = TempYaml("keybindings:\n  scroll_down: [x]\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.keybindings.scroll_down,
+            (std::vector<ftxui::Event>{ftxui::Event::Character('x')}));
+  EXPECT_EQ(cfg.keybindings.scroll_up, markit::KeyBindings{}.scroll_up);
+  EXPECT_EQ(cfg.theme.heading_h1, ftxui::Color::Red);  // theme untouched
+  std::remove(path.c_str());
+}
+
+// An empty list unbinds the action.
+TEST(Config, LoadConfig_KeybindingsEmptyListUnbinds) {
+  const std::string path = TempYaml("keybindings:\n  quit: []\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_TRUE(cfg.keybindings.quit.empty());
+  EXPECT_FALSE(markit::MatchesKey(ftxui::Event::Character('q'),
+                                  cfg.keybindings.quit));
+  std::remove(path.c_str());
+}
+
+// Special names are case-insensitive and aliases fold: UP/k reloads to the
+// exact default scroll_up list (single characters themselves stay
+// case-sensitive, so K/Q below would be different keys).
+TEST(Config, LoadConfig_KeybindingsCaseAndAliases) {
+  const std::string path =
+      TempYaml("keybindings:\n  scroll_up: [UP, k]\n  quit: [q, Escape, CTRL+C]\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.keybindings.scroll_up, markit::KeyBindings{}.scroll_up);
+  EXPECT_EQ(cfg.keybindings.quit, markit::KeyBindings{}.quit);
+  std::remove(path.c_str());
+}
+
+// Single characters stay case-sensitive: n and N coexist in one file.
+TEST(Config, LoadConfig_KeybindingsCharCaseSensitive) {
+  const std::string path =
+      TempYaml("keybindings:\n  search_next: [n]\n  search_prev: [N]\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_TRUE(markit::MatchesKey(ftxui::Event::Character('n'),
+                                 cfg.keybindings.search_next));
+  EXPECT_FALSE(markit::MatchesKey(ftxui::Event::Character('N'),
+                                  cfg.keybindings.search_next));
+  std::remove(path.c_str());
+}
+
+// Ctrl chords map to the raw control byte (== FTXUI's predefined Ctrl keys).
+TEST(Config, LoadConfig_KeybindingsCtrlChord) {
+  const std::string path = TempYaml("keybindings:\n  toggle_nav: [ctrl+x]\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.keybindings.toggle_nav,
+            (std::vector<ftxui::Event>{ftxui::Event::CtrlX}));
+  std::remove(path.c_str());
+}
+
+// Modal overlaps across contexts are allowed: Esc is both quit and
+// search_cancel, Enter both search_accept and nav_activate — by design.
+TEST(Config, LoadConfig_KeybindingsModalOverlapAllowed) {
+  const std::string path = TempYaml(
+      "keybindings:\n"
+      "  quit: [q, esc]\n"
+      "  search_cancel: [escape]\n"
+      "  search_accept: [return]\n"
+      "  nav_activate: [enter]\n"
+      "  scroll_up: [up]\n"
+      "  nav_up: [up, k]\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_TRUE(markit::MatchesKey(ftxui::Event::Escape, cfg.keybindings.quit));
+  EXPECT_TRUE(markit::MatchesKey(ftxui::Event::Escape,
+                                 cfg.keybindings.search_cancel));
+  EXPECT_TRUE(markit::MatchesKey(ftxui::Event::Return,
+                                 cfg.keybindings.search_accept));
+  EXPECT_TRUE(markit::MatchesKey(ftxui::Event::Return,
+                                 cfg.keybindings.nav_activate));
+  std::remove(path.c_str());
+}
+
+// A key shared by two actions in the same context fails fast — including via
+// alias folding (RETURN == enter, already nav_activate's key).
+TEST(Config, LoadConfig_KeybindingsSameContextDuplicateThrows) {
+  const std::string clash = TempYaml("keybindings:\n  scroll_up: [j]\n");
+  EXPECT_THROW(markit::LoadConfig(clash), std::runtime_error);
+  std::remove(clash.c_str());
+
+  const std::string alias = TempYaml("keybindings:\n  nav_up: [RETURN]\n");
+  EXPECT_THROW(markit::LoadConfig(alias), std::runtime_error);
+  std::remove(alias.c_str());
+
+  const std::string prompt =
+      TempYaml("keybindings:\n  search_accept: [esc]\n");
+  EXPECT_THROW(markit::LoadConfig(prompt), std::runtime_error);
+  std::remove(prompt.c_str());
+}
+
+// Remapping away frees the old key: quit without esc lets search_cancel keep
+// it, and scroll_down can then take q.
+TEST(Config, LoadConfig_KeybindingsRemapFreesOldKey) {
+  const std::string path =
+      TempYaml("keybindings:\n  quit: [ctrl+c]\n  scroll_down: [q]\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.keybindings.quit,
+            (std::vector<ftxui::Event>{ftxui::Event::CtrlC}));
+  EXPECT_TRUE(markit::MatchesKey(ftxui::Event::Character('q'),
+                                 cfg.keybindings.scroll_down));
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_KeybindingsUnknownActionThrows) {
+  const std::string path = TempYaml("keybindings:\n  scroll_sideways: [x]\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_KeybindingsUnknownKeyThrows) {
+  const std::string path = TempYaml("keybindings:\n  scroll_up: [f13]\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+
+  const std::string chord = TempYaml("keybindings:\n  quit: [ctrl+1]\n");
+  EXPECT_THROW(markit::LoadConfig(chord), std::runtime_error);
+  std::remove(chord.c_str());
+}
+
+TEST(Config, LoadConfig_KeybindingsWrongShapeThrows) {
+  const std::string non_map = TempYaml("keybindings: [up]\n");
+  EXPECT_THROW(markit::LoadConfig(non_map), std::runtime_error);
+  std::remove(non_map.c_str());
+
+  const std::string non_list = TempYaml("keybindings:\n  scroll_up: up\n");
+  EXPECT_THROW(markit::LoadConfig(non_list), std::runtime_error);
+  std::remove(non_list.c_str());
+
+  const std::string non_scalar =
+      TempYaml("keybindings:\n  scroll_up:\n    - [up]\n");
+  EXPECT_THROW(markit::LoadConfig(non_scalar), std::runtime_error);
+  std::remove(non_scalar.c_str());
+
+  const std::string non_scalar_key = TempYaml("keybindings:\n  ? [a]\n  : red\n");
+  EXPECT_THROW(markit::LoadConfig(non_scalar_key), std::runtime_error);
+  std::remove(non_scalar_key.c_str());
+}
+
+// A repeated key inside one list dedupes silently instead of throwing.
+TEST(Config, LoadConfig_KeybindingsWithinActionDedupe) {
+  const std::string path = TempYaml("keybindings:\n  scroll_up: [up, UP]\n");
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.keybindings.scroll_up,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowUp}));
+  std::remove(path.c_str());
+}
+
+// The dumped keybindings section reloads to exactly the defaults, so the
+// dump text cannot drift from the compiled-in mappings.
+TEST(Config, DumpDefaultConfig_KeybindingsRoundTrip) {
+  std::ostringstream out;
+  markit::DumpDefaultConfig(out);
+  const std::string s = out.str();
+  EXPECT_NE(s.find("keybindings:"), std::string::npos);
+  EXPECT_NE(s.find("scroll_up: [up, k]"), std::string::npos);
+  EXPECT_NE(s.find("quit: [q, esc, ctrl+c]"), std::string::npos);
+
+  const std::string path = TempYaml(out.str());
+  const markit::Config cfg = markit::LoadConfig(path);
+  EXPECT_EQ(cfg.keybindings, markit::KeyBindings{});
+  EXPECT_EQ(cfg.horizontal_wrap, markit::WrapMode::Wrap);
+  EXPECT_TRUE(cfg.nav_visible);
+  EXPECT_FALSE(cfg.search_case_sensitive);
+  std::remove(path.c_str());
+}
+
 }  // namespace

@@ -16,9 +16,18 @@
 #include <ftxui/dom/requirement.hpp>  // for Requirement
 #include <ftxui/screen/screen.hpp>    // for Screen, Dimension
 
+#include "config.hpp"  // for markit::KeyBindings, MatchesKey
+
 namespace ftxui {
 
 namespace {
+
+// Compiled-in defaults for callers that pass no keybindings (unit tests
+// exercising the default map).
+const markit::KeyBindings& DefaultKeyBindings() {
+  static const markit::KeyBindings kDefaults;
+  return kDefaults;
+}
 
 // Renders a width-constrained element into a tall screen and returns the last
 // row index with visible content (querying the full width, so trailing
@@ -60,7 +69,7 @@ class ScrollerBase : public ComponentBase {
                 std::function<void(int, int)> on_change, Ref<int> selected_x,
                 Ref<int> viewport_width, Ref<bool> horizontal_scroll,
                 int* content_height_out, Ref<int> wrap_hint_w,
-                Ref<int> wrap_hint_h)
+                Ref<int> wrap_hint_h, const markit::KeyBindings* keybindings)
       : selected_(std::move(selected)),
         viewport_height_(std::move(viewport_height)),
         on_change_(std::move(on_change)),
@@ -69,7 +78,8 @@ class ScrollerBase : public ComponentBase {
         horizontal_scroll_(std::move(horizontal_scroll)),
         content_height_out_(content_height_out),
         wrap_hint_w_(std::move(wrap_hint_w)),
-        wrap_hint_h_(std::move(wrap_hint_h)) {
+        wrap_hint_h_(std::move(wrap_hint_h)),
+        keybindings_(keybindings) {
     Add(child);
   }
 
@@ -172,21 +182,25 @@ class ScrollerBase : public ComponentBase {
     int max_offset = std::max(0, content_height_ - viewport_height);
 
     int after = before;
-    bool handled = true;
-    if (event == Event::ArrowUp || event == Event::Character('k')) {
+    // Navigation keys are configurable (markit::KeyBindings); the shape of
+    // the handling — clamp, no-op reporting, pan gating on scroll mode —
+    // is unchanged.
+    const markit::KeyBindings& kb =
+        keybindings_ != nullptr ? *keybindings_ : DefaultKeyBindings();
+    if (markit::MatchesKey(event, kb.scroll_up)) {
       after = before - 1;
-    } else if (event == Event::ArrowDown || event == Event::Character('j')) {
+    } else if (markit::MatchesKey(event, kb.scroll_down)) {
       after = before + 1;
-    } else if (event == Event::PageUp) {
+    } else if (markit::MatchesKey(event, kb.page_up)) {
       after = before - (viewport_height - 1);
-    } else if (event == Event::PageDown || event == Event::Character(' ')) {
+    } else if (markit::MatchesKey(event, kb.page_down)) {
       after = before + (viewport_height - 1);
-    } else if (event == Event::Home) {
+    } else if (markit::MatchesKey(event, kb.goto_top)) {
       after = 0;
-    } else if (event == Event::End) {
+    } else if (markit::MatchesKey(event, kb.goto_bottom)) {
       after = max_offset;
     } else if (*horizontal_scroll_ &&
-               (event == Event::ArrowLeft || event == Event::Character('h'))) {
+               markit::MatchesKey(event, kb.pan_left)) {
       int after_x = std::max(0, *selected_x_ - 1);
       if (after_x == *selected_x_) {
         return false;
@@ -194,7 +208,7 @@ class ScrollerBase : public ComponentBase {
       *selected_x_ = after_x;
       return true;
     } else if (*horizontal_scroll_ &&
-               (event == Event::ArrowRight || event == Event::Character('l'))) {
+               markit::MatchesKey(event, kb.pan_right)) {
       int viewport_width = std::max(1, *viewport_width_);
       int max_x_offset = std::max(0, content_width_ - viewport_width);
       int after_x = std::min(*selected_x_ + 1, max_x_offset);
@@ -240,6 +254,7 @@ class ScrollerBase : public ComponentBase {
   int* content_height_out_;
   Ref<int> wrap_hint_w_;
   Ref<int> wrap_hint_h_;
+  const markit::KeyBindings* keybindings_;
    int content_height_ = -1;
    int content_width_ = -1;
    int measured_wrap_width_ = -1;
@@ -253,15 +268,17 @@ class ScrollerBase : public ComponentBase {
 }  // namespace
 
 Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
-                    std::function<void(int, int)> on_change, Ref<int> selected_x,
-                    Ref<int> viewport_width, Ref<bool> horizontal_scroll,
-                    int* content_height_out, Ref<int> wrap_hint_w,
-                    Ref<int> wrap_hint_h) {
+                    std::function<void(int before, int after)> on_change,
+                    Ref<int> selected_x, Ref<int> viewport_width,
+                    Ref<bool> horizontal_scroll, int* content_height_out,
+                    Ref<int> wrap_hint_w, Ref<int> wrap_hint_h,
+                    const markit::KeyBindings* keybindings) {
   return Make<ScrollerBase>(std::move(child), std::move(selected),
                             std::move(viewport_height), std::move(on_change),
                             std::move(selected_x), std::move(viewport_width),
                             std::move(horizontal_scroll), content_height_out,
-                            std::move(wrap_hint_w), std::move(wrap_hint_h));
+                            std::move(wrap_hint_w), std::move(wrap_hint_h),
+                            keybindings);
 }
 
 }  // namespace ftxui
