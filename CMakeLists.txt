@@ -36,6 +36,25 @@ FetchContent_Declare(yaml-cpp
 )
 FetchContent_MakeAvailable(yaml-cpp)
 
+# RE2 (2025-11-05) builds against Abseil unconditionally, so both come via
+# FetchContent. ABSL_PROPAGATE_CXX_STD keeps Abseil on our C++ standard; the
+# BUILD_SHARED_LIBS=OFF pin above keeps both static.
+set(ABSL_PROPAGATE_CXX_STD ON)
+FetchContent_Declare(abseil
+  GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+  GIT_TAG        20250814.1
+)
+FetchContent_MakeAvailable(abseil)
+
+FetchContent_Declare(re2
+  GIT_REPOSITORY https://github.com/google/re2.git
+  GIT_TAG        2025-11-05
+)
+# RE2's install(EXPORT) rules assume an installed Abseil; markit never
+# installs, so skip them (avoids export-set errors with vendored Abseil).
+set(RE2_INSTALL OFF)
+FetchContent_MakeAvailable(re2)
+
 # Shared core: compiled once and linked by both the app and the tests.
 add_library(markit_core STATIC
   src/scroller.cpp
@@ -43,6 +62,7 @@ add_library(markit_core STATIC
   src/chrome.cpp
   src/anchor.cpp
   src/config.cpp
+  src/search.cpp
 )
 target_include_directories(markit_core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -54,6 +74,7 @@ target_link_libraries(markit_core
   PUBLIC ftxui::screen
   PUBLIC md4c
   PUBLIC yaml-cpp
+  PRIVATE re2::re2
 )
 
 add_executable(markit
@@ -76,6 +97,7 @@ if (MARKIT_BUILD_TESTS)
       src/chrome_test.cpp
       src/anchor_test.cpp
       src/config_test.cpp
+      src/search_test.cpp
     )
     target_link_libraries(markit-tests
       PRIVATE markit_core

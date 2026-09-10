@@ -12,10 +12,13 @@
 #include <ftxui/component/component.hpp>        // for Component
 #include <ftxui/util/ref.hpp>                   // for Ref
 
+#include "config.hpp"  // for markit::KeyBindings
+
 namespace ftxui {
 
 /// @brief A focusable top-anchored vertical pager over a child component.
-/// Navigation: j/k, ArrowUp/ArrowDown, PageUp/PageDown, Home/End.
+/// Navigation keys come from @p keybindings (defaults: j/k, ArrowUp/ArrowDown,
+/// PageUp/PageDown, Home/End, Space as PageDown).
 /// When @p horizontal_scroll is true, ArrowLeft/Right + h/l also pan the
 /// content horizontally (used for the "scroll" display mode; inactive while
 /// the content wraps to the viewport width).
@@ -36,6 +39,8 @@ namespace ftxui {
 /// @param wrap_hint_h Optional shared pre-measured wrap height, in rows
 ///        through the last non-blank one (same semantics as the internal
 ///        measurement), for the width in wrap_hint_w. -1 disables.
+/// @param keybindings Key lists for the scroll/page/goto/pan actions (see
+///        markit::KeyBindings). Null selects the compiled-in defaults.
 Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
                     std::function<void(int before, int after)> on_change = {},
                     Ref<int> selected_x = Ref<int>(0),
@@ -43,7 +48,8 @@ Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
                     Ref<bool> horizontal_scroll = Ref<bool>(false),
                     int* content_height_out = nullptr,
                     Ref<int> wrap_hint_w = Ref<int>(-1),
-                    Ref<int> wrap_hint_h = Ref<int>(-1));
+                    Ref<int> wrap_hint_h = Ref<int>(-1),
+                    const markit::KeyBindings* keybindings = nullptr);
 
 }  // namespace ftxui
 

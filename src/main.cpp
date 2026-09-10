@@ -1,9 +1,14 @@
 #include <algorithm>
+#include <atomic>  // for atomic
+#include <cstdint>  // for uint64_t
 #include <cstdlib>
 #include <fstream>
+#include <functional>  // for function
 #include <iostream>
 #include <iterator>
+#include <mutex>  // for mutex
 #include <string>
+#include <thread>  // for thread
 #include <utility>  // for pair
 #include <vector>
 
@@ -18,6 +23,7 @@
 #include "config.hpp"
 #include "markdown.hpp"
 #include "scroller.hpp"
+#include "search.hpp"
 
 using namespace ftxui;
 
@@ -137,11 +143,24 @@ int main(int argc, char** argv) {
   bool nav_focused = false;
   int nav_cursor = -1;
   int nav_offset = 0;
+  // In-document search (`/` opens, Esc closes): the query text being typed.
+  // Matches/match cursor live in the search cache below.
+  bool search_open = false;
+  std::string search_query;
   // Pre-measured wrap height from the toggle path: the anchor already renders
   // the new tree at the viewport width, so the scroller can adopt the height
   // instead of measuring again. Width -1 disables.
   int wrap_hint_w = -1;
   int wrap_hint_h = -1;
+
+  // Building the content tree re-parses the whole document, so cache it and
+  // rebuild only when the display mode changes. The viewport size is
+  // refreshed on every render instead, so a terminal resize takes effect
+  // immediately (the scroller reads these refs for its layout math).
+  // Declared early: the search state refresh below runs inside the content
+  // renderer and reads the cached tree.
+  markit::WrapMode rendered_mode = content_cfg.horizontal_wrap;
+  Element cached_content;
 
   // Static nav content: headings extracted once (no interaction yet).
   const std::vector<markit::Heading> headings =
@@ -158,17 +177,67 @@ int main(int argc, char** argv) {
   bool hl_scroll = false;
   std::vector<std::pair<int, int>> hl_map;
 
+  // Search state. Rows are plain-text copies of the live tree's visible rows
+  // (indices align 1:1 with scroll offsets); matches is the row list for the
+  // last compiled query; `search_pos` the index of the current match (-1
+  // before the first jump); `search_invalid` flags a query that failed to
+  // compile; `search_pending` flags rows not yet extracted. An empty query
+  // is "search inactive" and matches nothing.
+  //
+  // Row extraction (one full offscreen layout) runs on ONE short-lived
+  // worker thread so it never blocks input. The worker owns its private
+  // tree, rebuilt from the immutable `contents`; the loop shares only
+  // immutable inputs plus the handoff below. The loop side uses try_lock
+  // exclusively and at most one worker runs at a time; stale generations
+  // discard on landing.
+  std::mutex search_mu;
+  struct SearchRows {
+    std::vector<std::string> rows;
+    int viewport = -1;
+    bool scroll = false;
+  };
+  SearchRows search_bg;  // worker handoff, guarded by search_mu.
+  bool search_rows_ready = false;  // guarded by search_mu.
+  std::atomic<uint64_t> search_gen{0};  // generation of the flight/result.
+  std::atomic<bool> search_worker_running{false};
+  std::thread search_worker;
+  uint64_t search_adopted_gen = 0;  // generation currently in search_rows.
+  std::vector<std::string> search_rows;
+  int search_w_viewport = -1;  // inputs the rows were extracted for.
+  bool search_w_scroll = false;
+  bool search_rows_valid = false;
+  std::string search_compiled;
+  bool search_case = false;
+  bool search_invalid = false;
+  bool search_pending = false;
+  std::vector<int> search_matches;
+  int search_pos = -1;
+
+  // Live-view mark for the current match (SearchHighlight overlay): the
+  // target row plus its match byte spans, recomputed in
+  // refresh_search_state only when the query, target, or rows change —
+  // never per frame. -1/empty renders the content untouched.
+  int hl_match_row = -1;
+  std::vector<std::pair<int, int>> hl_match_spans;
+  std::string hl_match_query;
+  bool hl_match_case = false;
+
+  // Forward hook so the content renderer (below) can refresh match state
+  // before drawing; assigned beside the worker code further down (the
+  // spawn side needs `screen`, declared later). Content draws before the
+  // status bar in the same pass and renders happen on demand, so a mark
+  // refreshed only in the status phase would display one stale frame.
+  std::function<void()> refresh_search_state;
+
   // The chrome takes screen space the content must not use: one separator
   // row + action row + status row vertically, and the nav column (plus its
-  // separator) horizontally when visible.
+  // separator) horizontally when visible. The search prompt lives in the
+  // action-bar row, so opening it never resizes the viewport.
   constexpr int kChromeRows = 3;
 
   // Building the content tree re-parses the whole document, so cache it and
-  // rebuild only when the display mode changes. The viewport size is
-  // refreshed on every render instead, so a terminal resize takes effect
-  // immediately (the scroller reads these refs for its layout math).
-  markit::WrapMode rendered_mode = content_cfg.horizontal_wrap;
-  Element cached_content;
+  // rebuild only when the display mode changes. (Declarations live above,
+  // beside the search state that reads the cache.)
   auto content = Renderer([&] {
     const auto term_size = Terminal::Size();
     viewport_width = std::max(
@@ -179,6 +248,15 @@ int main(int argc, char** argv) {
       Element fresh = markit::RenderMarkdown(contents, content_cfg);
       cached_content =
           is_empty_placeholder ? fresh | dim : std::move(fresh);
+    }
+    // Refresh here (not just in the status bar): the content renders before
+    // the status row in the same frame, so the mark must already be current.
+    // refresh_search_state is idempotent — unchanged state recomputes
+    // nothing (span lookup covers one row only).
+    refresh_search_state();
+    if (hl_match_row >= 0 && !hl_match_spans.empty()) {
+      return markit::SearchHighlight(cached_content, &hl_match_row,
+                                     &hl_match_spans);
     }
     return cached_content;
   });
@@ -220,7 +298,7 @@ int main(int argc, char** argv) {
       Scroller(std::move(content), &selected, &viewport_height,
                [&](int before, int after) { log("scroll", before, after); },
                &selected_x, &viewport_width, &hscroll, &content_height,
-               &wrap_hint_w, &wrap_hint_h);
+               &wrap_hint_w, &wrap_hint_h, &config.keybindings);
 
   auto clamp_selected = [&] {
     const int max_offset = std::max(0, content_height - viewport_height);
@@ -245,14 +323,250 @@ int main(int argc, char** argv) {
     log("goto", before, selected);
   };
 
+  auto screen = App::Fullscreen();
+
+  // Spawn the extraction worker for the current tree/width, unless one is
+  // already running (its result is adopted or discarded by generation when
+  // it lands). Fire-and-forget: rows don't depend on the query, so typing
+  // never spawns workers — only tree/width changes do. Callers ensure the
+  // viewport is usable.
+  auto spawn_search_worker = [&] {
+    const uint64_t gen = search_gen.load() + 1;
+    search_gen.store(gen);
+    const markit::Config cfg = content_cfg;
+    const std::string& src = contents;
+    const int width =
+        markit::SearchExtractWidth(cached_content, viewport_width, hscroll);
+    const int vw = viewport_width;
+    const bool sc = hscroll;
+    const int hint = std::max(1, content_height);
+    if (search_worker.joinable()) {
+      search_worker.join();  // finished flight only (never a live one).
+    }
+    search_worker_running.store(true);
+    search_worker = std::thread([&, gen, cfg, vw, sc, width, hint] {
+      // Private tree: RenderMarkdown is a pure function of its inputs and
+      // FTXUI renders touch no shared mutable state, so this is race-free
+      // by construction. (The empty-file dim decorator changes style only,
+      // never text, so it is skipped here.)
+      ftxui::Element tree = markit::RenderMarkdown(src, cfg);
+      std::vector<std::string> rows =
+          markit::RenderTextRows(tree, width, hint);
+      {
+        std::lock_guard<std::mutex> lock(search_mu);
+        if (gen == search_gen.load()) {
+          search_bg = SearchRows{std::move(rows), vw, sc};
+          search_rows_ready = true;
+          // Wake the loop: FTXUI renders on demand, so without this the
+          // adoption (and the "..." -> count flip) would wait for the next
+          // keypress. PostEvent is thread-safe; Custom matches no binding
+          // and falls through harmlessly. Stale generations stay silent.
+          screen.PostEvent(Event::Custom);
+        }
+      }
+      search_worker_running.store(false);
+    });
+  };
+
+  // Ensure a rows extraction is coming for the current tree/width: spawn a
+  // worker unless the rows are already valid or one is already running.
+  auto ensure_search_rows = [&] {
+    if (!cached_content || viewport_width < 1 || viewport_height < 1) {
+      return;
+    }
+    if ((!search_rows_valid || search_w_viewport != viewport_width ||
+         search_w_scroll != hscroll) &&
+        !search_worker_running.load()) {
+      spawn_search_worker();
+    }
+  };
+
+  // Recompute the search match state plus the live-view mark. Rows arrive
+  // from the worker (adopted without ever blocking); matches are a regex
+  // re-scan of the rows on the loop (microseconds), so typing never blocks.
+  // A changed query drops the match cursor; a changed tree only clamps it.
+  // Matches outlive the prompt: closing it hides the UI but keeps the query
+  // so n/N keep navigating.
+  //
+  // Split from the worker spawn (which needs `screen`, declared later):
+  // assigned to the forward hook above so the content renderer can refresh
+  // first. This stays spawn-free; refresh_search below adds the spawn side.
+  refresh_search_state = [&] {
+    if (search_query.empty()) {
+      // Inactive: drop matches but keep extracted rows and any flight —
+      // rows don't depend on the query, so reopening is instant.
+      search_matches.clear();
+      search_pos = -1;
+      search_invalid = false;
+      search_pending = false;
+      search_compiled.clear();
+      hl_match_row = -1;
+      hl_match_spans.clear();
+      hl_match_query.clear();
+      return;
+    }
+    if (!cached_content || viewport_width < 1 || viewport_height < 1) {
+      return;
+    }
+    // Adopt worker rows without ever blocking the loop; a missed adoption
+    // retries next frame.
+    bool rows_rebuilt = false;
+    {
+      std::unique_lock<std::mutex> lock(search_mu, std::try_to_lock);
+      if (lock.owns_lock() && search_rows_ready &&
+          search_adopted_gen != search_gen.load()) {
+        search_rows = std::move(search_bg.rows);
+        search_w_viewport = search_bg.viewport;
+        search_w_scroll = search_bg.scroll;
+        search_rows_ready = false;
+        search_adopted_gen = search_gen.load();
+        search_rows_valid = true;
+        rows_rebuilt = true;
+      }
+    }
+    // Rows stale for the current tree/width? The old matches belong to
+    // another layout, so drop them and show pending; refresh_search (below)
+    // ensures a worker, since spawning needs `screen`.
+    if (!search_rows_valid || search_w_viewport != viewport_width ||
+        search_w_scroll != hscroll) {
+      search_rows_valid = false;
+      search_matches.clear();
+    }
+    // The matcher compiles on the loop (microseconds): an invalid query
+    // reports even while rows are still pending.
+    markit::Re2Matcher matcher(search_query, config.search_case_sensitive);
+    if (!matcher.ok()) {
+      search_invalid = true;
+      search_pending = false;
+      search_matches.clear();
+      search_pos = -1;
+      search_compiled = search_query;
+      search_case = config.search_case_sensitive;
+      hl_match_row = -1;
+      hl_match_spans.clear();
+      hl_match_query.clear();
+      return;
+    }
+    search_invalid = false;
+    if (!search_rows_valid) {
+      search_pending = true;
+      hl_match_row = -1;
+      hl_match_spans.clear();
+      hl_match_query.clear();
+      return;
+    }
+    search_pending = false;
+    const bool query_changed = (search_compiled != search_query ||
+                                search_case != config.search_case_sensitive);
+    if (rows_rebuilt || query_changed) {
+      search_matches = markit::FindMatches(search_rows, matcher);
+      search_compiled = search_query;
+      search_case = config.search_case_sensitive;
+      if (query_changed) {
+        search_pos = -1;
+      } else {
+        search_pos = std::clamp(search_pos, -1,
+                                static_cast<int>(search_matches.size()) - 1);
+      }
+    }
+    // The live-view mark follows the current match: the jumped-to row once
+    // search_pos sits on a match, else the row Enter/n would land on first
+    // (strict NextMatch from the top of view, mirroring goto_match).
+    // Spans cover one row only, so typing costs a single-row scan.
+    const int count = static_cast<int>(search_matches.size());
+    int target = -1;
+    if (count > 0) {
+      target = (search_pos >= 0 && search_pos < count)
+                   ? search_matches[search_pos]
+                   : markit::NextMatch(search_matches, selected - 1, +1);
+    }
+    if (target < 0 || target >= static_cast<int>(search_rows.size())) {
+      hl_match_row = -1;
+      hl_match_spans.clear();
+      hl_match_query.clear();
+    } else if (target != hl_match_row || hl_match_query != search_query ||
+               hl_match_case != config.search_case_sensitive ||
+               rows_rebuilt) {
+      hl_match_spans = matcher.FindSpans(search_rows[target]);
+      hl_match_row = target;
+      hl_match_query = search_query;
+      hl_match_case = config.search_case_sensitive;
+    }
+  };
+
+  // Full search refresh for event/status paths: match state plus worker
+  // spawn for stale rows. ensure_search_rows no-ops unless rows are
+  // missing/stale and no worker is flying.
+  auto refresh_search = [&] {
+    refresh_search_state();
+    if (!search_query.empty()) {
+      ensure_search_rows();
+    }
+  };
+
+  // Jump to the next (dir > 0) or previous (dir < 0) match, wrapping around.
+  // The first jump after a query change lands on the first match at or below
+  // (above, for dir < 0) the top of view: NextMatch is strict, so the seed
+  // is offset by one row to make the first jump inclusive.
+  auto goto_match = [&](int dir) {
+    refresh_search();
+    if (search_matches.empty()) {
+      return;
+    }
+    const int count = static_cast<int>(search_matches.size());
+    int row = search_matches.front();
+    if (search_pos < 0 || search_pos >= count) {
+      row = markit::NextMatch(search_matches,
+                              dir > 0 ? selected - 1 : selected + 1, dir);
+      for (int i = 0; i < count; ++i) {
+        if (search_matches[i] == row) {
+          search_pos = i;
+          break;
+        }
+      }
+    } else {
+      search_pos = (search_pos + dir + count) % count;
+      row = search_matches[search_pos];
+    }
+    const int before = selected;
+    selected = row;
+    selected_x = 0;
+    clamp_selected();
+    log("search", before, selected);
+  };
+
   auto status_bar = Renderer([&] {
     const int max_offset = std::max(0, content_height - viewport_height);
     const int current = std::clamp(selected, 0, max_offset);
+    std::string search_suffix;
+    if (!search_query.empty()) {
+      // Persistent match counter: visible while typing and while navigating
+      // with n/N after the prompt closed. `/` clears the query (fresh
+      // search), which hides the counter again. "..." while the worker rows
+      // are still on their way.
+      refresh_search();
+      if (search_pending) {
+        search_suffix = "...";
+      } else {
+        search_suffix = markit::FormatSearchStatus(
+            search_pos, static_cast<int>(search_matches.size()),
+            search_invalid);
+      }
+    }
     return markit::StatusBar(input_file, current, max_offset,
-                             content_cfg.horizontal_wrap);
+                             content_cfg.horizontal_wrap, search_suffix);
   });
-  auto action_bar = Renderer(
-      [&] { return markit::ActionBar(nav_focused); });
+  auto search_input = Input(&search_query);
+  // The prompt lives in the action-bar row while open: opening/closing never
+  // resizes the viewport, so the scroller never re-lays-out the content for
+  // search chrome. Renderer-with-child keeps Input focus handling.
+  auto action_bar = Renderer(search_input, [&]() -> Element {
+    if (search_open) {
+      return hbox({text("/ "), search_input->Render() | flex,
+                   text("  Enter:jump  Esc:close")});
+    }
+    return markit::ActionBar(nav_focused);
+  });
   auto nav_bar = Renderer([&]() -> Element {
     if (!nav_visible) {
       return emptyElement();
@@ -292,7 +606,10 @@ int main(int argc, char** argv) {
       nav_bar,
   });
 
-  auto screen = App::Fullscreen();
+  // All keys below come from the `keybindings:` config section (defaults
+  // preserve the historical mappings). Structural order is the precedence:
+  // search_cancel before quit, nav keys before the prompt/content fallthrough.
+  const markit::KeyBindings& kb = config.keybindings;
   auto component = CatchEvent(root, [&](Event event) -> bool {
     if (debug.is_open()) {
       debug << "input: " << event.DebugString()
@@ -300,11 +617,19 @@ int main(int argc, char** argv) {
       debug.flush();
     }
 
-    if (event == Event::q || event == Event::Escape || event == Event::CtrlC) {
+    if (search_open && markit::MatchesKey(event, kb.search_cancel)) {
+      // Esc closes the prompt first (before the global quit below). The
+      // query and matches are retained so n/N keep navigating; focus goes
+      // back to the content. `/` starts fresh.
+      search_open = false;
+      scroller->TakeFocus();
+      return true;
+    }
+    if (markit::MatchesKey(event, kb.quit)) {
       screen.Exit();
       return true;
     }
-    if (event == Event::Tab) {
+    if (markit::MatchesKey(event, kb.focus_switch)) {
       // Tab is the only focus switch: main view <-> nav bar. No-op when
       // the nav is hidden or the document has no headings.
       if (nav_visible && !headings.empty()) {
@@ -330,42 +655,77 @@ int main(int argc, char** argv) {
         nav_offset = markit::FollowNavOffset(nav_offset, nav_cursor, count,
                                              visible);
       };
-      if (event == Event::ArrowUp || event == Event::Character('k')) {
+      if (markit::MatchesKey(event, kb.nav_up)) {
         nav_cursor = std::max(0, nav_cursor - 1);
         follow();
         return true;
       }
-      if (event == Event::ArrowDown || event == Event::Character('j')) {
+      if (markit::MatchesKey(event, kb.nav_down)) {
         nav_cursor = std::min(count - 1, nav_cursor + 1);
         follow();
         return true;
       }
-      if (event == Event::Home) {
+      if (markit::MatchesKey(event, kb.nav_top)) {
         nav_cursor = 0;
         follow();
         return true;
       }
-      if (event == Event::End) {
+      if (markit::MatchesKey(event, kb.nav_bottom)) {
         nav_cursor = count - 1;
         follow();
         return true;
       }
-      if (event == Event::PageUp) {
+      if (markit::MatchesKey(event, kb.nav_page_up)) {
         nav_cursor = std::max(0, nav_cursor - visible);
         follow();
         return true;
       }
-      if (event == Event::PageDown) {
+      // Space still types into the search prompt while it is open, so the
+      // nav page-down binding skips a literal space in that state.
+      if (markit::MatchesKey(event, kb.nav_page_down) &&
+          !(search_open && event == Event::Character(' '))) {
         nav_cursor = std::min(count - 1, nav_cursor + visible);
         follow();
         return true;
       }
-      if (event == Event::Return) {
+      if (markit::MatchesKey(event, kb.nav_activate)) {
         jump_to_heading(nav_cursor);
         return true;
       }
     }
-    if (event == Event::Character('w')) {
+    if (search_open) {
+      // While the prompt is open, Enter accepts the query: jump to the next
+      // match and close the prompt (n/N keep navigating from there).
+      // Esc cancels without jumping. Every other key (including n/N and /)
+      // falls through to the Input as text.
+      if (markit::MatchesKey(event, kb.search_accept)) {
+        goto_match(+1);
+        search_open = false;
+        scroller->TakeFocus();
+        return true;
+      }
+      return false;
+    }
+    if (markit::MatchesKey(event, kb.search_next)) {
+      goto_match(+1);  // no-op without an active search.
+      return true;
+    }
+    if (markit::MatchesKey(event, kb.search_prev)) {
+      goto_match(-1);  // no-op without an active search.
+      return true;
+    }
+    if (markit::MatchesKey(event, kb.search_open)) {
+      search_open = true;
+      search_query.clear();
+      search_matches.clear();
+      search_pos = -1;
+      search_input->TakeFocus();
+      // Pre-warm the rows for the current tree on the worker: the first
+      // keystroke then scans instead of extracting.
+      ensure_search_rows();
+      return true;
+    }
+    if (markit::MatchesKey(event, kb.toggle_wrap)) {
       const bool old_is_scroll = hscroll;
       Element old_tree = cached_content;
       hscroll = !hscroll;
@@ -394,7 +754,7 @@ int main(int argc, char** argv) {
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
-    if (event == Event::Character('n')) {
+    if (markit::MatchesKey(event, kb.toggle_nav)) {
       nav_visible = !nav_visible;
       if (!nav_visible) {
         nav_focused = false;  // focus cannot stay in a hidden nav.
@@ -407,5 +767,8 @@ int main(int argc, char** argv) {
   });
 
   screen.Loop(component);
+  if (search_worker.joinable()) {
+    search_worker.join();  // reap the extraction worker, if still flying.
+  }
   return EXIT_SUCCESS;
 }

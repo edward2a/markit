@@ -76,13 +76,25 @@ def send(fd, keys):
     os.write(fd, keys)
 
 
-_SGR = re.compile(r"\[([0-9;]*)([A-Za-z])")
+_SGR = re.compile(r"\[([?0-9;]*)([A-Za-z])")
+
+
+def _csi_int(params, default=1):
+    try:
+        return int(params) if params and params.isdigit() else default
+    except ValueError:
+        return default
 
 
 def parse_grid(data, cols, rows):
     """Rebuild (chars, fg, bold, inverted) cell grids from a raw capture.
 
     fg holds the SGR palette code (30-37, 90-97) or None for default.
+
+    The app paints with relative cursor moves (A/B/C/D) and line clears (K)
+    against the live terminal cursor, so those are tracked like a terminal
+    (clamped to the grid); cursor-visibility and other DEC-private sequences
+    are skipped without emitting text.
     """
     text = data.decode("utf-8", "replace")
     ch = [[" "] * cols for _ in range(rows)]
@@ -91,6 +103,12 @@ def parse_grid(data, cols, rows):
     inv = [[False] * cols for _ in range(rows)]
     r = c = 0
     cur_fg, cur_bo, cur_inv = None, False, False
+
+    def erase_row(a, b):
+        for cc in range(max(0, a), min(cols, b)):
+            ch[r][cc], fg[r][cc] = " ", None
+            bo[r][cc], inv[r][cc] = False, False
+
     i = 0
     while i < len(text):
         if text[i] == "\x1b" and i + 1 < len(text) and text[i + 1] == "[":
@@ -119,18 +137,43 @@ def parse_grid(data, cols, rows):
                         cur_fg = None
             elif cmd in "Hf":
                 p = params.split(";")
-                r = (int(p[0]) if p[0] else 1) - 1
-                c = (int(p[1]) if len(p) > 1 and p[1] else 1) - 1
+                r = min(rows - 1, max(0, (int(p[0]) if p[0] else 1) - 1))
+                c = min(cols - 1, max(
+                    0, (int(p[1]) if len(p) > 1 and p[1] else 1) - 1))
             elif cmd == "G":
-                c = (int(params) if params else 1) - 1
+                c = min(cols - 1, max(0, _csi_int(params) - 1))
+            elif cmd == "A":
+                r = max(0, r - _csi_int(params))
+            elif cmd == "B":
+                r = min(rows - 1, r + _csi_int(params))
+            elif cmd == "C":
+                c = min(cols - 1, c + _csi_int(params))
+            elif cmd == "D":
+                c = max(0, c - _csi_int(params))
+            elif cmd == "E":
+                r = min(rows - 1, r + _csi_int(params))
+                c = 0
+            elif cmd == "F":
+                r = max(0, r - _csi_int(params))
+                c = 0
+            elif cmd == "K":
+                n = _csi_int(params, 0)
+                if n == 1:
+                    erase_row(0, c + 1)
+                elif n == 2:
+                    erase_row(0, cols)
+                else:
+                    erase_row(c, cols)
             continue
         elif text[i] == "\x1b":
-            i += 2  # non-CSI escape: skip
+            # Non-CSI escape: skip the introducer plus one byte (covers
+            # \x1b7/\x1b8 save/restore and \x1b(B charset selection).
+            i += 3 if i + 1 < len(text) and text[i + 1] in "()" else 2
             continue
         elif text[i] == "\r":
             c = 0
         elif text[i] == "\n":
-            r += 1
+            r = min(rows - 1, r + 1)
         elif text[i] in "\x00\x07":
             pass
         else:

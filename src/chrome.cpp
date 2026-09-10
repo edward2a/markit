@@ -5,8 +5,11 @@
 
 #include <algorithm>  // for clamp, max
 #include <string>  // for string, to_string
+#include <utility>  // for pair
 
+#include <ftxui/dom/node.hpp>  // for Node, Render
 #include <ftxui/screen/color.hpp>  // for Color
+#include <ftxui/screen/screen.hpp>  // for Screen, Cell
 
 namespace markit {
 
@@ -106,24 +109,42 @@ std::string FormatPosition(int selected, int max_offset, WrapMode mode) {
 }
 
 ftxui::Element StatusBar(const std::string& filename, int selected,
-                         int max_offset, WrapMode mode) {
+                         int max_offset, WrapMode mode,
+                         const std::string& search_suffix) {
   using namespace ftxui;
+  std::string right = FormatPosition(selected, max_offset, mode);
+  if (!search_suffix.empty()) {
+    right += "  " + search_suffix;
+  }
   return hbox({
              text(Basename(filename)),
              text("") | flex,
-             text(FormatPosition(selected, max_offset, mode)),
+             text(right),
          }) |
          inverted;
+}
+
+std::string FormatSearchStatus(int current, int total, bool invalid) {
+  if (invalid) {
+    return "invalid pattern";
+  }
+  if (total <= 0) {
+    return "no matches";
+  }
+  if (current < 0 || current >= total) {
+    return std::to_string(total) + " matches";
+  }
+  return std::to_string(current + 1) + "/" + std::to_string(total);
 }
 
 ftxui::Element ActionBar(bool nav_focused) {
   using namespace ftxui;
   return text(nav_focused
                   ? "Tab:main  Up/Down:move  PgUp/PgDn:page  Home/End:first/"
-                    "last  Enter:goto section"
-                  : "q:quit  w:wrap/scroll  n:nav  Tab:focus  j/k+arrows:"
-                    "scroll  PgUp/PgDn:page  Home/End:top/bottom  h/l+arrows:"
-                    "pan (scroll)") |
+                    "last  Enter:goto section  /:search  n/N:match"
+                  : "q:quit  w:wrap/scroll  Ctrl+N:nav  Tab:focus  /:search  "
+                    "n/N:match  j/k+arrows:scroll  PgUp/PgDn:page  Home/End:"
+                    "top/bottom  h/l+arrows:pan (scroll)") |
          dim;
 }
 
@@ -176,6 +197,72 @@ int FollowNavOffset(int offset, int cursor, int count, int visible) {
     offset = cursor - window + 1;
   }
   return ClampNavOffset(offset, count, visible);
+}
+
+namespace {
+
+// Post-render mark for the current search match: the child renders normally,
+// then the cells overlapping the match byte spans flip `inverted`. Bytes map
+// to cells by walking the row's graphemes (a cell's `character` carries its
+// own byte length), so wide/combining characters land correctly. Out-of-view
+// writes are swallowed by the screen stencil; the walk stops past the last
+// span's bytes, so an oversized box costs nothing.
+class SearchHighlightNode : public ftxui::Node {
+ public:
+  SearchHighlightNode(ftxui::Element child, const int* row,
+                      const std::vector<std::pair<int, int>>* spans)
+      : Node({std::move(child)}), row_(row), spans_(spans) {}
+
+  void SetBox(ftxui::Box box) override {
+    Node::SetBox(box);
+    children_[0]->SetBox(box);
+  }
+
+  void Render(ftxui::Screen& screen) override {
+    children_[0]->Render(screen);
+    if (row_ == nullptr || spans_ == nullptr || spans_->empty()) {
+      return;
+    }
+    const int row = *row_;
+    // requirement_ is the child's (Node::ComputeRequirement forwards it):
+    // a row outside the content needs no walk at all.
+    if (row < 0 || row >= requirement_.min_y) {
+      return;
+    }
+    int last_end = 0;
+    for (const auto& [s, e] : *spans_) {
+      last_end = std::max(last_end, e);
+    }
+    const int y = box_.y_min + row;
+    int consumed = 0;  // row-text bytes in the cells passed so far.
+    for (int x = box_.x_min; x <= box_.x_max; ++x) {
+      ftxui::Cell& cell = screen.CellAt(x, y);
+      const int start = consumed;
+      consumed += static_cast<int>(cell.character.size());
+      for (const auto& [s, e] : *spans_) {
+        if (start < e && consumed > s) {
+          cell.inverted ^= true;
+          break;
+        }
+      }
+      if (consumed >= last_end) {
+        break;  // past every span: later cells cannot overlap (bytes only
+                // grow; a zero-byte cell here starts at/after every end).
+      }
+    }
+  }
+
+ private:
+  const int* row_;
+  const std::vector<std::pair<int, int>>* spans_;
+};
+
+}  // namespace
+
+ftxui::Element SearchHighlight(
+    ftxui::Element child, const int* row,
+    const std::vector<std::pair<int, int>>* spans) {
+  return std::make_shared<SearchHighlightNode>(std::move(child), row, spans);
 }
 
 }  // namespace markit

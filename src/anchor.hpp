@@ -9,6 +9,7 @@
 #ifndef MARKIT_ANCHOR_HPP
 #define MARKIT_ANCHOR_HPP
 
+#include <string>   // for string
 #include <utility>  // for pair
 #include <vector>  // for vector
 
@@ -28,6 +29,26 @@ namespace markit {
 std::vector<std::pair<int, int>> LocateHeadingRows(
     const ftxui::Element& tree, const std::vector<Heading>& headings,
     int width, int viewport_height, bool is_scroll);
+
+// Render `tree` offscreen at `width`, returning one plain-text row per
+// content row (raw cell text, rows through the last non-blank one; interior
+// blanks kept so indices align with scroll offsets). `height_hint` seeds the
+// render height (the scroller's measured content height when known); a
+// grow-and-re-render loop keeps it correct when the hint falls short. Wrap
+// trees render at the viewport width; scroll trees render wide (they never
+// split rows, so indices stay stable while clipped text becomes searchable)
+// — callers choose the width.
+std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
+                                        int height_hint);
+
+// Extract width for search rows: the viewport width in wrap mode; in scroll
+// mode the tree's natural width, so clipped text is searchable while row
+// indices stay stable (scroll rows never split). Passing the full width
+// matters for performance: the offscreen Screen allocates width x height
+// cells, so an uncapped wide render on a tall document costs hundreds of
+// megabytes per extraction and blocks the event loop for seconds.
+int SearchExtractWidth(const ftxui::Element& tree, int viewport_width,
+                       bool is_scroll);
 
 // Map the top-of-view position from one mode's tree to the other's.
 // `old_selected` is the pre-toggle offset, `old_is_scroll` the pre-toggle

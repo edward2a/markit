@@ -323,6 +323,61 @@ std::optional<int> HeadingAnchor(const std::vector<int>& old_bounds,
 
 }  // namespace
 
+// Render the tree offscreen at `width` and return the raw cell text of every
+// row through the last non-blank one (same row identity as the anonymous
+// RenderRows above, but un-normalized: search matches what the user sees).
+// The seed comes from the caller's height hint; the growth loop is the
+// correctness backstop when the hint is short (same truncation check).
+std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
+                                        int height_hint) {
+  width = std::clamp(width, 1, 8192);
+  int cap = std::clamp(height_hint, 1, 65536);
+  ftxui::Screen screen =
+      ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                            ftxui::Dimension::Fixed(cap));
+  int last = -1;
+  for (;;) {
+    ftxui::Render(screen, tree);
+    last = -1;
+    for (int row = 0; row < cap; ++row) {
+      for (int col = 0; col < width; ++col) {
+        if (!IsBlankCell(screen.CellAt(col, row))) {
+          last = row;
+          break;
+        }
+      }
+    }
+    if (last < cap - 1 || cap >= 65536) {
+      break;
+    }
+    cap = std::min(65536, cap * 4);
+    screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                   ftxui::Dimension::Fixed(cap));
+  }
+  std::vector<std::string> rows;
+  for (int row = 0; row <= last; ++row) {
+    std::string raw;
+    raw.reserve(static_cast<size_t>(width));
+    for (int col = 0; col < width; ++col) {
+      raw += screen.CellAt(col, row).character;
+    }
+    rows.push_back(raw);
+  }
+  return rows;
+}
+
+int SearchExtractWidth(const ftxui::Element& tree, int viewport_width,
+                        bool is_scroll) {
+  if (!is_scroll || !tree || viewport_width < 1) {
+    return std::max(1, viewport_width);
+  }
+  // The tree's own requirement: scroll rows never split, so the natural
+  // width exposes every clipped character with stable row indices — at a
+  // fraction of the cells of an uncapped wide render.
+  tree->ComputeRequirement();
+  return NaturalWidth(tree->requirement().min_x, viewport_width);
+}
+
 int MapTogglePosition(const ftxui::Element& old_tree,
                       const ftxui::Element& new_tree,
                       const std::vector<Heading>& headings, int old_selected,
