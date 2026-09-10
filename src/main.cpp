@@ -676,7 +676,8 @@ int main(int argc, char** argv) {
         follow();
         return true;
       }
-      if (event == Event::PageDown) {
+      if (event == Event::PageDown ||
+          (!search_open && event == Event::Character(' '))) {
         nav_cursor = std::min(count - 1, nav_cursor + visible);
         follow();
         return true;

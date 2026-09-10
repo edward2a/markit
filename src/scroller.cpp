@@ -179,7 +179,7 @@ class ScrollerBase : public ComponentBase {
       after = before + 1;
     } else if (event == Event::PageUp) {
       after = before - (viewport_height - 1);
-    } else if (event == Event::PageDown) {
+    } else if (event == Event::PageDown || event == Event::Character(' ')) {
       after = before + (viewport_height - 1);
     } else if (event == Event::Home) {
       after = 0;

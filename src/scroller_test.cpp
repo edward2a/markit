@@ -170,6 +170,18 @@ TEST(Scroller, PageScrollsByViewportHeight) {
   EXPECT_EQ(selected, 30 - (kHeight - 1));
 }
 
+// Space pages down exactly like PageDown.
+TEST(Scroller, SpacePagesDown) {
+  int n = 60;
+  int selected = 0;
+  int viewport = kHeight;
+  auto scroller = WrapScroller(MakeLines(n), &selected, &viewport);
+  Prime(scroller);
+
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::Character(' ')));
+  EXPECT_EQ(selected, kHeight - 1);
+}
+
 // Home jumps to the first line; End to the last possible scroll offset (the
 // line placed at the top when the viewport is filled to the bottom).
 TEST(Scroller, HomeEnd) {
@@ -222,6 +234,7 @@ TEST(Scroller, NoScrollWhenContentFitsViewport) {
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::k));
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::PageDown));
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::PageUp));
+  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::Character(' ')));
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::End));
   EXPECT_FALSE(scroller->OnEvent(ftxui::Event::Home));
   EXPECT_EQ(selected, 0);
