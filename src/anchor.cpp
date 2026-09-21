@@ -4,6 +4,7 @@
 #include <algorithm>  // for clamp, count_if, max
 #include <cmath>      // for llround
 #include <cstdlib>    // for abs
+#include <limits>     // for numeric_limits
 #include <optional>  // for optional
 #include <string>     // for string, to_string
 #include <utility>    // for pair
@@ -335,7 +336,13 @@ std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
   ftxui::Screen screen =
       ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
                             ftxui::Dimension::Fixed(cap));
+  // Grow while the render is full (the last visible row carries text). A
+  // blank last row is ambiguous: interior gaps (paragraph separators,
+  // heading spacing) can land exactly on the cap boundary with content
+  // below, so a roomy render only ends the loop when it reveals no more
+  // text than the previous one.
   int last = -1;
+  int prev_last = std::numeric_limits<int>::max();
   for (;;) {
     ftxui::Render(screen, tree);
     last = -1;
@@ -347,12 +354,13 @@ std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
         }
       }
     }
-    if (last < cap - 1 || cap >= 65536) {
+    if ((last < cap - 1 && last <= prev_last) || cap >= 65536) {
       break;
     }
+    prev_last = last;
     cap = std::min(65536, cap * 4);
     screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
-                                   ftxui::Dimension::Fixed(cap));
+                                    ftxui::Dimension::Fixed(cap));
   }
   std::vector<std::string> rows;
   for (int row = 0; row <= last; ++row) {

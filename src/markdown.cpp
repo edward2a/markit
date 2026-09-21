@@ -1318,7 +1318,7 @@ class Renderer {
       case MD_BLOCK_P: {
         EndHtmlParaContext();
         Frame top = Pop();
-        Attach(InlineBlocks(top), false);
+        Attach(InlineBlocks(top), true);
         break;
       }
       case MD_BLOCK_H: {
