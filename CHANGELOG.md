@@ -18,6 +18,7 @@ Versions are ordered newest-first: new change lines append inside the top sectio
 - 2026-09-22T20:33:46Z - mod - Narrow the Markdown render-settings API to Theme + WrapMode for the asynchronous search worker, removing unnecessary keybinding copies and retaining a stable source lifetime across the worker flight
 - 2026-09-22T20:33:46Z - add - Add explicit Release and MinSizeRel build paths, size-report support, and production dependency-tool pruning; production profiles disable tests, benchmarks, md4c's md2html utility, and yaml-cpp utility targets while development defaults remain unchanged
 - 2026-09-22T20:33:46Z - mod - Add Markdown render-settings equivalence coverage and verify search, highlight, wrap, and scroll flows in both modes; default tests, benchmark, Release, and MinSizeRel builds pass
+- 2026-09-22T21:35:44Z - mod - Replace full-height offscreen extraction with bounded vertical FTXUI windows shared by search rows and toggle anchors; preserve logical row indices, interior blanks, wide scroll text, and tall-document mapping while reducing the benchmark suite's peak RSS from about 1.1 GiB to about 107 MiB and the wide-scroll sample from about 1.18 s to about 105 ms
 
 ## 0.0.7 - 2026-09-21T22:33:33Z
 

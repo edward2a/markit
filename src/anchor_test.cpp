@@ -56,9 +56,12 @@ std::string Normalize(const std::string& s) {
 }
 
 // Rendered text rows of a tree at the test width (content rows only).
-std::vector<std::string> LayoutRows(ftxui::Element el, int width) {
+std::vector<std::string> LayoutRows(ftxui::Element el, int width,
+                                    int height_hint = -1) {
   el->ComputeRequirement();
-  int cap = std::clamp(el->requirement().min_y, 256, 65536);
+  int cap = height_hint > 0
+                ? std::clamp(height_hint, 1, 65536)
+                : std::clamp(el->requirement().min_y, 256, 65536);
   ftxui::Screen screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
                                               ftxui::Dimension::Fixed(cap));
   int last = -1;
@@ -729,6 +732,70 @@ TEST(Anchor, RenderTextRowsGrowsPastShortHint) {
   const auto hinted = markit::RenderTextRows(tree, kWidth, 1);
   const auto seeded = markit::RenderTextRows(tree, kWidth, 1000);
   EXPECT_EQ(hinted, seeded);
+}
+
+// Extraction remains equivalent across a vertical window boundary. The
+// reference layout is intentionally modest so this test checks row identity,
+// including interior blank rows, without reproducing the production path.
+TEST(Anchor, RenderTextRowsPreservesChunkBoundaries) {
+  std::string doc;
+  for (int i = 0; i < 700; ++i) {
+    doc += "paragraph " + std::to_string(i) +
+           " has enough words to exercise the wrapped row layout\n\n";
+  }
+  auto tree = markit::RenderMarkdown(doc, WrapCfg());
+  const auto actual = markit::RenderTextRows(tree, kWidth, 1);
+  const auto expected =
+      LayoutRows(markit::RenderMarkdown(doc, WrapCfg()), kWidth, 4096);
+  ASSERT_EQ(actual.size(), expected.size());
+  for (size_t i = 0; i < actual.size(); ++i) {
+    EXPECT_EQ(Normalize(actual[i]), expected[i]) << "row " << i;
+  }
+}
+
+// Scroll rows keep their identity when extraction crosses a chunk and a wide
+// render still exposes text beyond the viewport clip.
+TEST(Anchor, RenderTextRowsWideScrollPreservesRowsAcrossChunks) {
+  std::string doc;
+  for (int i = 0; i < 700; ++i) {
+    doc += "row " + std::to_string(i) + " prefix ";
+    doc.append(220, 'x');
+    doc += " needle\n\n";
+  }
+  auto tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const auto narrow = markit::RenderTextRows(tree, kWidth, 1);
+  const auto wide = markit::RenderTextRows(tree, 400, 1);
+  const auto expected =
+      LayoutRows(markit::RenderMarkdown(doc, ScrollCfg()), 400);
+  ASSERT_EQ(wide.size(), expected.size());
+  ASSERT_EQ(narrow.size(), wide.size());
+  for (size_t i = 0; i < wide.size(); ++i) {
+    EXPECT_EQ(Normalize(wide[i]), expected[i]) << "row " << i;
+  }
+  EXPECT_NE(wide.back().find("needle"), std::string::npos);
+  EXPECT_EQ(narrow.back().find("needle"), std::string::npos);
+}
+
+// The metadata renderer used by toggle anchoring keeps a selected row stable
+// after crossing a bounded extraction window.
+TEST(Anchor, MapTogglePreservesTallAnchor) {
+  std::string doc = "# Guide\n\n";
+  for (int i = 0; i < 700; ++i) {
+    doc += "entry " + std::to_string(i) + " has a unique anchor\n\n";
+  }
+  auto old_tree = markit::RenderMarkdown(doc, ScrollCfg());
+  auto new_tree = markit::RenderMarkdown(doc, WrapCfg());
+  const auto old_rows = markit::RenderTextRows(old_tree, kWidth, 1);
+  const int anchor = FindPrefix(old_rows, "entry 650");
+  ASSERT_GE(anchor, 0);
+
+  const int mapped = markit::MapTogglePosition(
+      old_tree, new_tree, markit::ExtractHeadings(doc), anchor, kWidth, kHeight,
+      true);
+  const auto new_rows = markit::RenderTextRows(new_tree, kWidth, 1);
+  ASSERT_GE(mapped, 0);
+  ASSERT_LT(mapped, static_cast<int>(new_rows.size()));
+  EXPECT_EQ(Normalize(new_rows[mapped]).rfind("entry 650", 0), 0u);
 }
 
 // Scroll trees never split rows: wide and narrow renders agree on row

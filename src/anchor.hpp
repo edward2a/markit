@@ -32,12 +32,11 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
 
 // Render `tree` offscreen at `width`, returning one plain-text row per
 // content row (raw cell text, rows through the last non-blank one; interior
-// blanks kept so indices align with scroll offsets). `height_hint` seeds the
-// render height (the scroller's measured content height when known); a
-// grow-and-re-render loop keeps it correct when the hint falls short. Wrap
-// trees render at the viewport width; scroll trees render wide (they never
-// split rows, so indices stay stable while clipped text becomes searchable)
-// — callers choose the width.
+// blanks kept so indices align with scroll offsets). Extraction uses bounded
+// vertical windows, so `height_hint` is only a reserve hint for the returned
+// rows. Wrap trees render at the viewport width; scroll trees render wide (they
+// never split rows, so indices stay stable while clipped text becomes
+// searchable) — callers choose the width.
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
                                         int height_hint);
 
