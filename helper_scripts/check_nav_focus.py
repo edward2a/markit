@@ -102,14 +102,14 @@ def main():
         doc = tmp.name
     ses = Session(doc, config_text=config, cols=COLS, rows=ROWS)
     try:
-        raw, ch, fg, bo, inv = ses.frame(keys=HOME)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=HOME)
         if show:
             dump("home", ch)
         check("preamble: no highlight, nothing inverted",
               not any(highlighted(fg, bo, r) for r in range(ROWS)) and
               not any(inverted(inv, r) for r in range(ROWS)))
 
-        raw, ch, fg, bo, inv = ses.frame(keys=TAB)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=TAB)
         if show:
             dump("tab", ch)
         title = find_row(ch, "Outline", NAV_COL)
@@ -121,14 +121,14 @@ def main():
         check("no view highlight yet",
               not any(highlighted(fg, bo, r) for r in range(ROWS)))
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"j")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"j")
         if show:
             dump("j", ch)
         check("j moves nav cursor to Beta, view stays put",
               only_cursor(ch, inv, "Beta", title) is not None and
               not any(highlighted(fg, bo, r) for r in range(ROWS)))
 
-        raw, ch, fg, bo, inv = ses.frame(keys=RET)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=RET)
         if show:
             dump("enter-beta", ch)
         rb = only_highlighted(ch, fg, bo, "Beta")
@@ -136,21 +136,21 @@ def main():
               rb is not None and inverted(inv, rb) and
               inverted(inv, title), "navrow=%s" % rb)
 
-        raw, ch, fg, bo, inv = ses.frame(keys=END)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=END)
         if show:
             dump("end", ch)
         check("End moves cursor to Gamma, view still Beta",
               only_cursor(ch, inv, "Gamma", title) is not None and
               only_highlighted(ch, fg, bo, "Beta") is not None)
 
-        raw, ch, fg, bo, inv = ses.frame(keys=RET)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=RET)
         if show:
             dump("enter-gamma", ch)
         rg = only_highlighted(ch, fg, bo, "Gamma")
         check("Enter jumps to Gamma: sole highlight + cursor",
               rg is not None and inverted(inv, rg), "navrow=%s" % rg)
 
-        raw, ch, fg, bo, inv = ses.frame(keys=TAB)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=TAB)
         if show:
             dump("tab-back", ch)
         check("Tab back: title plain, no inverted heading rows",

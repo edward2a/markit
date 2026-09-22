@@ -24,6 +24,8 @@ struct Theme {
   ftxui::Color code_block_fg = ftxui::Color::GrayLight;
   ftxui::Color code_block_bg = ftxui::Color::GrayDark;
   ftxui::Color quote_marker = ftxui::Color::GrayDark;
+  // Whole-window background. Default ("none") keeps the terminal background.
+  ftxui::Color background = ftxui::Color::Default;
 };
 
 // Horizontal overflow handling for block-level content that exceeds the
@@ -94,8 +96,10 @@ struct Config {
   KeyBindings keybindings;
 };
 
-// Parse a color string: a named FTXUI Palette16 color (case-insensitive) or a
-// hex truecolor string "#rrggbb" / "#rgb". Returns nullopt on any failure.
+// Parse a color string: a named FTXUI Palette16 color (case-insensitive), a
+// hex truecolor string "#rrggbb" / "#rgb", or "none" (case-insensitive) for
+// the default terminal background (ftxui::Color::Default). Returns nullopt on
+// any failure.
 std::optional<ftxui::Color> ParseColor(const std::string& s);
 
 // Resolve the default config path "${HOME}/.config/markit/markit.yml".

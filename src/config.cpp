@@ -90,6 +90,7 @@ void LookupColor(const std::string& key, const YAML::Node& value,
 void ValidateTheme(const YAML::Node& theme, Theme& out) {
   static const std::unordered_set<std::string> kKnownTopLevel = {
       "heading", "link", "inline_code", "code_block", "quote_marker",
+      "background",
   };
   static const std::unordered_set<std::string> kKnownHeading = {
       "h1", "h2", "h3", "h4",
@@ -168,6 +169,8 @@ void ValidateTheme(const YAML::Node& theme, Theme& out) {
       LookupColor(key, value, out.link, "theme");
     } else if (key == "quote_marker") {
       LookupColor(key, value, out.quote_marker, "theme");
+    } else if (key == "background") {
+      LookupColor(key, value, out.background, "theme");
     } else if (kKnownTopLevel.count(key) == 0) {
       throw std::runtime_error("config: theme." + key + ": unknown key");
     }
@@ -555,6 +558,10 @@ bool MatchesKey(const ftxui::Event& event,
 std::optional<ftxui::Color> ParseColor(const std::string& in) {
   const std::string s = Lowercase(in);
 
+  if (s == "none") {
+    return ftxui::Color::Default;
+  }
+
   if (!s.empty() && s[0] == '#') {
     std::string hex =
         (s.size() == 4) ? ExpandHexShorthand(s) : s;  // #rgb -> #rrggbb
@@ -657,9 +664,11 @@ void DumpDefaultConfig(std::ostream& out) {
       << "#       black, red, green, yellow, blue, magenta, cyan, white,\n"
       << "#       redlight, greenlight, yellowlight, bluelight, magentalight,\n"
       << "#       cyanlight, graylight, graydark\n"
-      << "#   - a hex truecolor string:\n"
-      << "#       #rrggbb  (e.g. #ff8000)\n"
-      << "#       #rgb     (shorthand, e.g. #f80)\n"
+       << "#   - a hex truecolor string:\n"
+       << "#       #rrggbb  (e.g. #ff8000)\n"
+       << "#       #rgb     (shorthand, e.g. #f80)\n"
+       << "#   `theme.background` additionally accepts `none` (the default),\n"
+       << "#   which keeps the terminal background.\n"
       << "#\n"
       << "# Unset keys fall back to these defaults. To customize, edit a value,\n"
       << "# then run:\n"
@@ -677,8 +686,9 @@ void DumpDefaultConfig(std::ostream& out) {
       << "  code_block:     # fenced ``` code blocks\n"
       << "    fg: " << ColorName(Theme{}.code_block_fg) << "\n"
       << "    bg: " << ColorName(Theme{}.code_block_bg) << "\n"
-      << "  quote_marker: " << ColorName(Theme{}.quote_marker) << "\n"
-      << "display:\n"
+       << "  quote_marker: " << ColorName(Theme{}.quote_marker) << "\n"
+       << "  background: none  # whole-window background; none = terminal\n"
+       << "display:\n"
       << "  horizontal: " << (Config{}.horizontal_wrap == WrapMode::Scroll
                                   ? "scroll"
                                   : "wrap")

@@ -6,13 +6,15 @@ Usage:
     ses = Session(doc_path="notes.md", config_text="display:\\n  horizontal: wrap\\n")
     raw = ses.snapshot()            # initial frame bytes
     raw = ses.snapshot(keys=b"jj")  # send keys, wait, capture repaint
-    ch, fg, bold, inv = parse_grid(raw, ses.cols, ses.rows)
+    ch, fg, bg, bo, inv = parse_grid(raw, ses.cols, ses.rows)
     ses.close()
 
 Frames are full-terminal repaints: parse_grid() rebuilds per-cell
-(character, SGR foreground palette code or None, bold flag, inverted
-flag) grids by interpreting cursor addressing (H/f/G), CR/LF, and SGR
-'m' sequences.
+(character, SGR foreground palette code or None, SGR background code or
+None, bold flag, inverted flag) grids by interpreting cursor addressing
+(H/f/G), CR/LF, and SGR 'm' sequences. Background codes are ints for
+4-bit/8-bit palette colors (40-47, 100-107) and ("p256", n) / ("rgb", r, g,
+b) tuples for 48;5 / 48;2 extended sequences.
 Only the LAST write to each cell in the byte stream is kept, so drain
 until the app is idle before trusting a frame (snapshot() settles).
 Lower-level helpers (spawn, drain, send) are exposed for scripts that
@@ -87,9 +89,12 @@ def _csi_int(params, default=1):
 
 
 def parse_grid(data, cols, rows):
-    """Rebuild (chars, fg, bold, inverted) cell grids from a raw capture.
+    """Rebuild (chars, fg, bg, bold, inverted) cell grids from a raw capture.
 
     fg holds the SGR palette code (30-37, 90-97) or None for default.
+    bg holds the SGR background code (40-47, 100-107), an ("p256", n) tuple
+    for 48;5;n, an ("rgb", r, g, b) tuple for 48;2;r;g;b, or None for the
+    terminal default.
 
     The app paints with relative cursor moves (A/B/C/D) and line clears (K)
     against the live terminal cursor, so those are tracked like a terminal
@@ -99,14 +104,15 @@ def parse_grid(data, cols, rows):
     text = data.decode("utf-8", "replace")
     ch = [[" "] * cols for _ in range(rows)]
     fg = [[None] * cols for _ in range(rows)]
+    bg = [[None] * cols for _ in range(rows)]
     bo = [[False] * cols for _ in range(rows)]
     inv = [[False] * cols for _ in range(rows)]
     r = c = 0
-    cur_fg, cur_bo, cur_inv = None, False, False
+    cur_fg, cur_bg, cur_bo, cur_inv = None, None, False, False
 
     def erase_row(a, b):
         for cc in range(max(0, a), min(cols, b)):
-            ch[r][cc], fg[r][cc] = " ", None
+            ch[r][cc], fg[r][cc], bg[r][cc] = " ", None, None
             bo[r][cc], inv[r][cc] = False, False
 
     i = 0
@@ -119,10 +125,13 @@ def parse_grid(data, cols, rows):
             params, cmd = m.group(1), m.group(2)
             i = m.end()
             if cmd == "m":
-                for p in params.split(";") if params else ["0"]:
-                    n = int(p) if p else 0
+                codes = [int(p) if p else 0
+                         for p in params.split(";")] if params else [0]
+                j = 0
+                while j < len(codes):
+                    n = codes[j]
                     if n == 0:
-                        cur_fg, cur_bo, cur_inv = None, False, False
+                        cur_fg, cur_bg, cur_bo, cur_inv = None, None, False, False
                     elif n == 1:
                         cur_bo = True
                     elif n == 7:
@@ -135,6 +144,19 @@ def parse_grid(data, cols, rows):
                         cur_fg = n
                     elif n == 39:
                         cur_fg = None
+                    elif 40 <= n <= 47 or 100 <= n <= 107:
+                        cur_bg = n
+                    elif n == 48 and j + 2 < len(codes) and codes[j + 1] == 5:
+                        cur_bg = ("p256", codes[j + 2])
+                        j += 2
+                    elif (n == 48 and j + 4 < len(codes) and
+                            codes[j + 1] == 2):
+                        cur_bg = ("rgb", codes[j + 2], codes[j + 3],
+                                  codes[j + 4])
+                        j += 4
+                    elif n == 49:
+                        cur_bg = None
+                    j += 1
             elif cmd in "Hf":
                 p = params.split(";")
                 r = min(rows - 1, max(0, (int(p[0]) if p[0] else 1) - 1))
@@ -178,11 +200,11 @@ def parse_grid(data, cols, rows):
             pass
         else:
             if 0 <= r < rows and 0 <= c < cols:
-                ch[r][c], fg[r][c], bo[r][c], inv[r][c] = \
-                    text[i], cur_fg, cur_bo, cur_inv
+                ch[r][c], fg[r][c], bg[r][c], bo[r][c], inv[r][c] = \
+                    text[i], cur_fg, cur_bg, cur_bo, cur_inv
             c += 1
         i += 1
-    return ch, fg, bo, inv
+    return ch, fg, bg, bo, inv
 
 
 def row_text(ch_row):
