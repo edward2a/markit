@@ -11,6 +11,14 @@ Versions are ordered newest-first: new change lines append inside the top sectio
 
 ---
 
+## 0.0.8 - 2026-09-22T20:33:46Z
+
+- 2026-09-22T20:33:46Z - add - Opt-in `markit-bench` performance target with deterministic small, large, wrapped, and wide fixtures, warmup/sample controls, CSV timing output, and `make bench`
+- 2026-09-22T20:33:46Z - mod - Cache the RE2 matcher by query and case sensitivity, and reuse the search-highlight wrapper while the cached content tree is unchanged so repeated frames avoid matcher construction and requirement invalidation
+- 2026-09-22T20:33:46Z - mod - Narrow the Markdown render-settings API to Theme + WrapMode for the asynchronous search worker, removing unnecessary keybinding copies and retaining a stable source lifetime across the worker flight
+- 2026-09-22T20:33:46Z - add - Add explicit Release and MinSizeRel build paths, size-report support, and production dependency-tool pruning; production profiles disable tests, benchmarks, md4c's md2html utility, and yaml-cpp utility targets while development defaults remain unchanged
+- 2026-09-22T20:33:46Z - mod - Add Markdown render-settings equivalence coverage and verify search, highlight, wrap, and scroll flows in both modes; default tests, benchmark, Release, and MinSizeRel builds pass
+
 ## 0.0.7 - 2026-09-21T22:33:33Z
 
 - 2026-09-21T22:33:33Z - mod - Paragraphs render separated by a blank row: MD_BLOCK_P now attaches with a leading blank like every other block type, so a single empty line in source yields a visible gap (also after --- rules, which now carry blanks on both sides, and inside quotes where the marker continues through the gap); fixed the RenderTextRows growth loop whose blank-last-row stop condition truncated extraction at interior gaps (now stops only when a roomy render reveals no new text), which the new spacing exposed; HrHasBlankOnBothSides replaces StandaloneHrKeepsLeadingBlankOnly, new ConsecutiveParagraphsSeparatedByBlank + BlockquoteParagraphsSeparatedByBlank, 194/194 + ctest

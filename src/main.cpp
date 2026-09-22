@@ -6,6 +6,7 @@
 #include <functional>  // for function
 #include <iostream>
 #include <iterator>
+#include <memory>  // for unique_ptr, make_unique
 #include <mutex>  // for mutex
 #include <string>
 #include <thread>  // for thread
@@ -161,6 +162,8 @@ int main(int argc, char** argv) {
   // renderer and reads the cached tree.
   markit::WrapMode rendered_mode = content_cfg.horizontal_wrap;
   Element cached_content;
+  Element cached_highlight;
+  Element highlighted_base;
 
   // Static nav content: headings extracted once (no interaction yet).
   const std::vector<markit::Heading> headings =
@@ -208,6 +211,10 @@ int main(int argc, char** argv) {
   bool search_rows_valid = false;
   std::string search_compiled;
   bool search_case = false;
+  std::unique_ptr<markit::Re2Matcher> search_matcher;
+  std::string search_matcher_query;
+  bool search_matcher_case = false;
+  bool search_matcher_ready = false;
   bool search_invalid = false;
   bool search_pending = false;
   std::vector<int> search_matches;
@@ -255,9 +262,18 @@ int main(int argc, char** argv) {
     // nothing (span lookup covers one row only).
     refresh_search_state();
     if (hl_match_row >= 0 && !hl_match_spans.empty()) {
-      return markit::SearchHighlight(cached_content, &hl_match_row,
-                                     &hl_match_spans);
+      // The highlight node stores pointers to the stable row/span state above.
+      // Reusing the wrapper keeps the scroller's requirement cache valid while
+      // the match moves within the same content tree.
+      if (!cached_highlight || highlighted_base.get() != cached_content.get()) {
+        cached_highlight = markit::SearchHighlight(
+            cached_content, &hl_match_row, &hl_match_spans);
+        highlighted_base = cached_content;
+      }
+      return cached_highlight;
     }
+    cached_highlight.reset();
+    highlighted_base.reset();
     return cached_content;
   });
 
@@ -333,8 +349,9 @@ int main(int argc, char** argv) {
   auto spawn_search_worker = [&] {
     const uint64_t gen = search_gen.load() + 1;
     search_gen.store(gen);
-    const markit::Config cfg = content_cfg;
-    const std::string& src = contents;
+    const markit::Theme worker_theme = content_cfg.theme;
+    const markit::WrapMode worker_mode = content_cfg.horizontal_wrap;
+    const std::string* source = &contents;
     const int width =
         markit::SearchExtractWidth(cached_content, viewport_width, hscroll);
     const int vw = viewport_width;
@@ -344,28 +361,31 @@ int main(int argc, char** argv) {
       search_worker.join();  // finished flight only (never a live one).
     }
     search_worker_running.store(true);
-    search_worker = std::thread([&, gen, cfg, vw, sc, width, hint] {
-      // Private tree: RenderMarkdown is a pure function of its inputs and
-      // FTXUI renders touch no shared mutable state, so this is race-free
-      // by construction. (The empty-file dim decorator changes style only,
-      // never text, so it is skipped here.)
-      ftxui::Element tree = markit::RenderMarkdown(src, cfg);
-      std::vector<std::string> rows =
-          markit::RenderTextRows(tree, width, hint);
-      {
-        std::lock_guard<std::mutex> lock(search_mu);
-        if (gen == search_gen.load()) {
-          search_bg = SearchRows{std::move(rows), vw, sc};
-          search_rows_ready = true;
-          // Wake the loop: FTXUI renders on demand, so without this the
-          // adoption (and the "..." -> count flip) would wait for the next
-          // keypress. PostEvent is thread-safe; Custom matches no binding
-          // and falls through harmlessly. Stale generations stay silent.
-          screen.PostEvent(Event::Custom);
+    search_worker = std::thread(
+        [&, gen, source, worker_theme, worker_mode, vw, sc, width, hint] {
+          // Private tree: RenderMarkdown is a pure function of its inputs and
+          // FTXUI renders touch no shared mutable state, so this is race-free
+          // by construction. (The empty-file dim decorator changes style only,
+          // never text, so it is skipped here.)
+          ftxui::Element tree =
+              markit::RenderMarkdown(*source, worker_theme, worker_mode);
+          std::vector<std::string> rows =
+              markit::RenderTextRows(tree, width, hint);
+          {
+            std::lock_guard<std::mutex> lock(search_mu);
+            if (gen == search_gen.load()) {
+              search_bg = SearchRows{std::move(rows), vw, sc};
+              search_rows_ready = true;
+              // Wake the loop: FTXUI renders on demand, so without this the
+              // adoption (and the "..." -> count flip) would wait for the next
+              // keypress. PostEvent is thread-safe; Custom matches no binding
+              // and falls through harmlessly. Stale generations stay silent.
+              screen.PostEvent(Event::Custom);
+            }
+          }
+          search_worker_running.store(false);
         }
-      }
-      search_worker_running.store(false);
-    });
+    );
   };
 
   // Ensure a rows extraction is coming for the current tree/width: spawn a
@@ -400,6 +420,11 @@ int main(int argc, char** argv) {
       search_invalid = false;
       search_pending = false;
       search_compiled.clear();
+      search_case = false;
+      search_matcher.reset();
+      search_matcher_query.clear();
+      search_matcher_case = false;
+      search_matcher_ready = false;
       hl_match_row = -1;
       hl_match_spans.clear();
       hl_match_query.clear();
@@ -432,9 +457,18 @@ int main(int argc, char** argv) {
       search_rows_valid = false;
       search_matches.clear();
     }
-    // The matcher compiles on the loop (microseconds): an invalid query
-    // reports even while rows are still pending.
-    markit::Re2Matcher matcher(search_query, config.search_case_sensitive);
+    // Compile once per query/case revision. This path runs from both the
+    // content and status renderers in the same frame.
+    if (!search_matcher_ready ||
+        search_matcher_query != search_query ||
+        search_matcher_case != config.search_case_sensitive) {
+      search_matcher = std::make_unique<markit::Re2Matcher>(
+          search_query, config.search_case_sensitive);
+      search_matcher_query = search_query;
+      search_matcher_case = config.search_case_sensitive;
+      search_matcher_ready = true;
+    }
+    const markit::Re2Matcher& matcher = *search_matcher;
     if (!matcher.ok()) {
       search_invalid = true;
       search_pending = false;

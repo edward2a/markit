@@ -23,6 +23,11 @@ namespace markit {
 ftxui::Element RenderMarkdown(const std::string& markdown,
                               const Config& config = Config{});
 
+// Narrow render-settings overload for callers that do not need the rest of
+// the interactive Config, such as the asynchronous search extractor.
+ftxui::Element RenderMarkdown(const std::string& markdown, const Theme& theme,
+                              WrapMode mode);
+
 }  // namespace markit
 
 #endif  // MARKIT_MARKDOWN_HPP

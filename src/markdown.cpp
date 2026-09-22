@@ -34,10 +34,13 @@ std::string Attr(const MD_ATTRIBUTE& attr) {
 
 class Renderer {
  public:
-  explicit Renderer(std::string markdown, const Config& config)
+  Renderer(std::string markdown, const Theme& theme, WrapMode mode)
       : source_(std::move(markdown)),
-        theme_(config.theme),
-        wrap_(config.horizontal_wrap == WrapMode::Wrap) {}
+        theme_(theme),
+        wrap_(mode == WrapMode::Wrap) {}
+
+  explicit Renderer(std::string markdown, const Config& config)
+      : Renderer(std::move(markdown), config.theme, config.horizontal_wrap) {}
 
   Element Run() {
     MD_PARSER parser = {};
@@ -1812,7 +1815,12 @@ class Renderer {
 }  // namespace
 
 Element RenderMarkdown(const std::string& markdown, const Config& config) {
-  return Renderer(markdown, config).Run();
+  return RenderMarkdown(markdown, config.theme, config.horizontal_wrap);
+}
+
+Element RenderMarkdown(const std::string& markdown, const Theme& theme,
+                       WrapMode mode) {
+  return Renderer(markdown, theme, mode).Run();
 }
 
 }  // namespace markit

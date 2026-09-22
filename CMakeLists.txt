@@ -7,6 +7,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # (-std=gnu++17), so the build does not depend on the toolchain default.
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(MARKIT_BUILD_TESTS "Build markit tests" ON)
+option(MARKIT_BUILD_DEPENDENCY_TOOLS
+       "Build utility targets from vendored dependencies" ON)
+if (NOT MARKIT_BUILD_DEPENDENCY_TOOLS)
+  set(BUILD_MD2HTML_EXECUTABLE OFF CACHE BOOL
+      "Whether to compile the md2html executable" FORCE)
+  set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL
+      "Enable yaml-cpp contrib in library" FORCE)
+  set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL
+      "Enable yaml-cpp parse tools" FORCE)
+endif()
+
 # yaml-cpp 0.8.0 declares cmake_minimum_required(3.5); newer CMake rejects
 # configuring a subproject below its minimum supported policy version unless
 # this minimum is relaxed.
@@ -87,7 +99,6 @@ target_link_libraries(markit
   PRIVATE markit_core
 )
 
-option(MARKIT_BUILD_TESTS "Build markit tests" ON)
 if (MARKIT_BUILD_TESTS)
   enable_testing()
 
@@ -110,4 +121,14 @@ if (MARKIT_BUILD_TESTS)
   else()
     message(STATUS "markit: tests require BUILD_SHARED_LIBS=OFF; skipped")
   endif()
+endif()
+
+option(MARKIT_BUILD_BENCHMARKS "Build opt-in markit benchmarks" OFF)
+if (MARKIT_BUILD_BENCHMARKS)
+  add_executable(markit-bench
+    benchmarks/bench_main.cpp
+  )
+  target_link_libraries(markit-bench
+    PRIVATE markit_core
+  )
 endif()
