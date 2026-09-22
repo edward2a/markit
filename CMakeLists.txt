@@ -1,6 +1,124 @@
 cmake_minimum_required(VERSION 3.11)
 project(markit LANGUAGES CXX)
 
+function(markit_changelog_version CONTENT OUT_VAR)
+  string(REGEX MATCH "## ([0-9]+\\.[0-9]+\\.[0-9]+)" _match "${CONTENT}")
+  if (_match)
+    set(${OUT_VAR} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+  else()
+    set(${OUT_VAR} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+# Version output is generated during configuration so the binary does not
+# need Git at runtime. Release tags are made on master; a newer changelog
+# section on another branch is therefore an unreleased version.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/CHANGELOG.md" _markit_changelog)
+markit_changelog_version("${_markit_changelog}" _markit_current_version)
+
+set(_markit_version_string "devel-unknown")
+find_package(Git QUIET)
+if (GIT_FOUND)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --is-inside-work-tree
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE _markit_git_worktree
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE _markit_git_result
+  )
+  if (_markit_git_result EQUAL 0 AND _markit_git_worktree STREQUAL "true")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      OUTPUT_VARIABLE _markit_commit_id
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE _markit_commit_result
+    )
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" symbolic-ref --quiet --short HEAD
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      OUTPUT_VARIABLE _markit_branch
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE _markit_branch_result
+    )
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" describe --tags --exact-match
+              --match "[0-9]*.[0-9]*.[0-9]*" HEAD
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      OUTPUT_VARIABLE _markit_exact_tag
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE _markit_tag_result
+    )
+
+    if (_markit_commit_result EQUAL 0)
+      set(_markit_channel "devel")
+      if (_markit_branch STREQUAL "master" OR _markit_tag_result EQUAL 0)
+        set(_markit_channel "master")
+      endif()
+
+      # Prefer the local master ref, then origin/master, and finally the
+      # latest reachable release tag for shallow or detached checkouts.
+      set(_markit_master_changelog "")
+      foreach (_markit_master_ref master origin/master)
+        execute_process(
+          COMMAND "${GIT_EXECUTABLE}" show
+                  "${_markit_master_ref}:CHANGELOG.md"
+          WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+          OUTPUT_VARIABLE _markit_master_candidate
+          ERROR_QUIET
+          RESULT_VARIABLE _markit_master_result
+        )
+        if (_markit_master_result EQUAL 0)
+          set(_markit_master_changelog "${_markit_master_candidate}")
+          break()
+        endif()
+      endforeach()
+      if (_markit_master_changelog STREQUAL "")
+        execute_process(
+          COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0
+                  --match "[0-9]*.[0-9]*.[0-9]*" HEAD
+          WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+          OUTPUT_VARIABLE _markit_latest_tag
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET
+          RESULT_VARIABLE _markit_latest_tag_result
+        )
+        if (_markit_latest_tag_result EQUAL 0)
+          execute_process(
+            COMMAND "${GIT_EXECUTABLE}" show
+                    "${_markit_latest_tag}:CHANGELOG.md"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE _markit_master_changelog
+            ERROR_QUIET
+          )
+        endif()
+      endif()
+      markit_changelog_version(
+        "${_markit_master_changelog}" _markit_master_version
+      )
+
+      if (_markit_current_version STREQUAL "")
+        set(_markit_current_version "unknown")
+      endif()
+      if (_markit_channel STREQUAL "master")
+        set(_markit_version_string
+            "${_markit_current_version}-master-${_markit_commit_id}")
+      elseif (NOT _markit_master_version STREQUAL "" AND
+              NOT _markit_current_version STREQUAL _markit_master_version)
+        set(_markit_version_string
+            "${_markit_current_version}-devel-${_markit_commit_id}")
+      else()
+        set(_markit_version_string "devel-${_markit_commit_id}")
+      endif()
+    endif()
+  endif()
+endif()
+message(STATUS "markit version: ${_markit_version_string}")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Enforce the strict ISO standard (-std=c++17) instead of the GNU dialect
@@ -95,12 +213,19 @@ target_link_libraries(markit_core
 add_executable(markit
   src/main.cpp
 )
+target_compile_definitions(markit
+  PRIVATE "MARKIT_VERSION=\"${_markit_version_string}\""
+)
 target_link_libraries(markit
   PRIVATE markit_core
 )
 
 if (MARKIT_BUILD_TESTS)
   enable_testing()
+  add_test(NAME markit-version COMMAND markit --version)
+  set_tests_properties(markit-version PROPERTIES
+    PASS_REGULAR_EXPRESSION "markit ${_markit_version_string}"
+  )
 
   if (NOT BUILD_SHARED_LIBS)
     include(${ftxui_SOURCE_DIR}/cmake/ftxui_find_google_test.cmake)

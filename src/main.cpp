@@ -35,6 +35,7 @@ void PrintUsage(std::ostream& out) {
       << "\n"
       << "Options:\n"
       << "  -h, --help          Show this help message and exit.\n"
+      << "  --version           Show the version and exit.\n"
       << "  --config <file>     Path to a YAML config file (default: "
          "~/.config/markit/markit.yml).\n"
       << "  --dump-config       Print the default config (as YAML) to stdout "
@@ -52,6 +53,7 @@ int main(int argc, char** argv) {
   std::string config_file;
   bool dump_config = false;
   bool help = false;
+  bool version = false;
   const char* input_file = nullptr;
 
   for (int i = 1; i < argc; ++i) {
@@ -64,12 +66,19 @@ int main(int argc, char** argv) {
       dump_config = true;
     } else if (arg == "-h" || arg == "--help") {
       help = true;
+    } else if (arg == "--version") {
+      version = true;
     } else if (input_file == nullptr) {
       input_file = argv[i];
     } else {
       std::cerr << "error: unexpected argument '" << arg << "'\n";
       return EXIT_FAILURE;
     }
+  }
+
+  if (version) {
+    std::cout << "markit " << MARKIT_VERSION << "\n";
+    return EXIT_SUCCESS;
   }
 
   if (help) {
