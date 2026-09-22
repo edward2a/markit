@@ -63,6 +63,16 @@ TEST(Config, ParseColor_Invalid) {
   EXPECT_FALSE(markit::ParseColor("").has_value());
 }
 
+TEST(Config, ParseColor_NoneMapsToDefault) {
+  const auto none = markit::ParseColor("none");
+  ASSERT_TRUE(none.has_value());
+  EXPECT_EQ(*none, ftxui::Color::Default);
+
+  const auto upper = markit::ParseColor("NONE");
+  ASSERT_TRUE(upper.has_value());
+  EXPECT_EQ(*upper, ftxui::Color::Default);
+}
+
 TEST(Config, LoadConfig_MissingFileReturnsDefaults) {
   const markit::Config cfg =
       markit::LoadConfig("/nonexistent/markit-missing.yml");
@@ -74,6 +84,7 @@ TEST(Config, LoadConfig_MissingFileReturnsDefaults) {
   EXPECT_EQ(t.code_block_fg, ftxui::Color::GrayLight);
   EXPECT_EQ(t.code_block_bg, ftxui::Color::GrayDark);
   EXPECT_EQ(t.quote_marker, ftxui::Color::GrayDark);
+  EXPECT_EQ(t.background, ftxui::Color::Default);  // none = terminal bg
 }
 
 TEST(Config, LoadConfig_EmptyPathReturnsDefaults) {
@@ -88,6 +99,7 @@ TEST(Config, Config_WrapsTheme) {
   EXPECT_EQ(defaults.theme.heading_h1, ftxui::Color::Red);
   EXPECT_EQ(defaults.theme.inline_code_bg, ftxui::Color::GrayDark);
   EXPECT_EQ(defaults.theme.quote_marker, ftxui::Color::GrayDark);
+  EXPECT_EQ(defaults.theme.background, ftxui::Color::Default);
 }
 
 // The default display mode is Wrap (user decision Q1) and survives load.
@@ -244,6 +256,42 @@ TEST(Config, LoadConfig_InvalidColorThrows) {
   std::remove(path.c_str());
 }
 
+TEST(Config, LoadConfig_BackgroundNamedAndHex) {
+  const std::string named = TempYaml("theme:\n  background: red\n");
+  EXPECT_EQ(markit::LoadConfig(named).theme.background, ftxui::Color::Red);
+  std::remove(named.c_str());
+
+  const std::string hex = TempYaml("theme:\n  background: '#123456'\n");
+  EXPECT_EQ(markit::LoadConfig(hex).theme.background,
+            ftxui::Color::RGB(0x12, 0x34, 0x56));
+  std::remove(hex.c_str());
+}
+
+TEST(Config, LoadConfig_BackgroundNoneExplicit) {
+  const std::string path = TempYaml("theme:\n  background: none\n");
+  EXPECT_EQ(markit::LoadConfig(path).theme.background,
+            ftxui::Color::Default);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_BackgroundInvalidThrows) {
+  const std::string path = TempYaml("theme:\n  background: notacolor\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+TEST(Config, LoadConfig_BackgroundWrongTypeThrows) {
+  const std::string path = TempYaml("theme:\n  background:\n    fg: red\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
+TEST(Config, DumpDefaultConfig_ContainsBackgroundNone) {
+  std::ostringstream out;
+  markit::DumpDefaultConfig(out);
+  EXPECT_NE(out.str().find("background: none"), std::string::npos);
+}
+
 TEST(Config, LoadConfig_WrongTypeThrows) {
   const std::string path = TempYaml("theme:\n  link:\n    fg: red\n");
   EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
@@ -295,6 +343,7 @@ TEST(Config, DumpDefaultConfig_RoundTripMatchesDefaults) {
       markit::ParseColor(theme["code_block"]["fg"].Scalar()).value(),
       markit::ParseColor(theme["code_block"]["bg"].Scalar()).value(),
       markit::ParseColor(theme["quote_marker"].Scalar()).value(),
+      markit::ParseColor(theme["background"].Scalar()).value(),
   };
 
   EXPECT_EQ(dumped.heading_h1, defaults.heading_h1);
@@ -307,6 +356,7 @@ TEST(Config, DumpDefaultConfig_RoundTripMatchesDefaults) {
   EXPECT_EQ(dumped.code_block_fg, defaults.code_block_fg);
   EXPECT_EQ(dumped.code_block_bg, defaults.code_block_bg);
   EXPECT_EQ(dumped.quote_marker, defaults.quote_marker);
+  EXPECT_EQ(dumped.background, defaults.background);
 
   // The display section round-trips: the dumped document reloads to the
   // default Wrap mode and a visible nav bar.

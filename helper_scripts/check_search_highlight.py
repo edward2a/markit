@@ -118,47 +118,47 @@ def main():
         ses.frame(keys=b"\x1b[H")
         # Generous settle: the extraction worker must land before the mark
         # can appear.
-        raw, ch, fg, bo, inv = ses.frame(keys=b"/needle", settle=2.0)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"/needle", settle=2.0)
         check("incremental count before jumping",
               "3 matches" in status(ch), status(ch))
         expect_mark(ch, inv, "needle alpha", "typing marks the first match")
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"\r")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"\r")
         check("Enter accepts and sits on match 1",
               "1/3" in status(ch), status(ch))
         expect_mark(ch, inv, "needle alpha", "mark stays after Enter")
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"n")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"n")
         check("n goes to match 2", "2/3" in status(ch), status(ch))
         expect_mark(ch, inv, "needle beta", "mark follows to match 2")
         expect_unmarked(ch, inv, "needle alpha",
                         "match 1 unmarked after n")
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"n")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"n")
         check("n goes to match 3", "3/3" in status(ch), status(ch))
         expect_mark(ch, inv, "needle gamma", "mark follows to match 3")
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"n")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"n")
         check("n wraps to match 1", "1/3" in status(ch), status(ch))
         expect_mark(ch, inv, "needle alpha", "mark wraps to match 1")
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"/need" + ESC)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"/need" + ESC)
         check("Esc cancels but retains",
               "3 matches" in status(ch), status(ch))
         # Retained query keeps navigating from the top; the mark tracks it.
         # (The retained query here is "need", retyped before Esc.)
-        raw, ch, fg, bo, inv = ses.frame(keys=b"n")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"n")
         check("retained query navigates", "1/3" in status(ch), status(ch))
         expect_mark(ch, inv, "needle alpha", "mark tracks retained query",
                     span="need")
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"/")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"/")
         check("fresh prompt clears the counter",
               "matches" not in status(ch) and
               "pattern" not in status(ch), status(ch))
         expect_no_marks(ch, inv, "cleared query leaves no mark")
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"[" + ESC)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"[" + ESC)
         check("invalid pattern reported",
               "invalid pattern" in status(ch), status(ch))
         expect_no_marks(ch, inv, "invalid pattern leaves no mark")

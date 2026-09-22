@@ -605,6 +605,9 @@ int main(int argc, char** argv) {
       nav_separator,
       nav_bar,
   });
+  if (config.theme.background != ftxui::Color::Default) {
+    root = root | ftxui::bgcolor(config.theme.background);
+  }
 
   // All keys below come from the `keybindings:` config section (defaults
   // preserve the historical mappings). Structural order is the precedence:

@@ -100,7 +100,7 @@ def main():
         doc = tmp.name
     ses = Session(doc, config_text=config, cols=COLS, rows=ROWS)
     try:
-        raw, ch, fg, bo, inv = ses.frame(keys=b"\x1b[H")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"\x1b[H")
         if show:
             dump("home", ch)
 
@@ -112,37 +112,37 @@ def main():
               "matches" not in status() and "pattern" not in status() and
               prompt_row(ch) < 0, status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"/")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"/")
         if show:
             dump("slash", ch)
         check("prompt row opens", prompt_row(ch) >= 0)
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"needle")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"needle")
         if show:
             dump("typed", ch)
         check("incremental count before jumping",
               "3 matches" in status(), status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"\r")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"\r")
         if show:
             dump("enter", ch)
         check("Enter accepts: prompt closed, on match 1",
               "1/3" in status() and prompt_row(ch) < 0, status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"n")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"n")
         check("n goes to match 2", "2/3" in status(), status())
-        raw, ch, fg, bo, inv = ses.frame(keys=b"n")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"n")
         check("n goes to match 3", "3/3" in status(), status())
-        raw, ch, fg, bo, inv = ses.frame(keys=b"n")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"n")
         check("n wraps to match 1", "1/3" in status(), status())
-        raw, ch, fg, bo, inv = ses.frame(keys=b"N")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"N")
         if show:
             dump("N", ch)
         check("N goes back to match 3", "3/3" in status(), status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"\x1b[H")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"\x1b[H")
         top = status()
-        raw, ch, fg, bo, inv = ses.frame(keys=b"/need" + ESC)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"/need" + ESC)
         if show:
             dump("esc-cancel", ch)
         check("Esc cancels without jumping, query retained",
@@ -151,11 +151,11 @@ def main():
               position_of(status())[0] == position_of(top)[0] and
               position_of(status())[1] == position_of(top)[1], status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"n")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"n")
         check("retained query navigates from the top",
               "1/3" in status(), status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"/")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"/")
         pr = prompt_row(ch)
         # A cleared query hides the counter (the app only shows a suffix for
         # a non-empty query), which proves the fresh prompt is empty even
@@ -165,13 +165,13 @@ def main():
               "pattern" not in status(),
               ("row %d " % pr if pr >= 0 else "") + status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"[")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"[")
         if show:
             dump("invalid", ch)
         check("invalid pattern reported",
               "invalid pattern" in status(), status())
         before = position_of(status())
-        raw, ch, fg, bo, inv = ses.frame(keys=b"\r")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"\r")
         # The totals may shift (Enter closes the prompt, growing the viewport
         # by a row), but the current position must not move.
         after = position_of(status())
@@ -180,12 +180,12 @@ def main():
               before[0] == after[0] and
               "invalid pattern" in status(), status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=CTRL_N)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=CTRL_N)
         if show:
             dump("ctrln", ch)
         check("Ctrl+N hides the nav",
               all("Outline" not in row_text(ch, r) for r in range(ROWS)))
-        raw, ch, fg, bo, inv = ses.frame(keys=CTRL_N)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=CTRL_N)
         check("Ctrl+N restores the nav",
               any("Outline" in row_text(ch, r) for r in range(ROWS)))
     finally:

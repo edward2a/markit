@@ -145,21 +145,52 @@ TEST(Markdown, HeadingHrParagraphBlankAfterRule) {
   EXPECT_EQ(rows[3], "world");
 }
 
-// A standalone --- (no heading before it) keeps its leading-blank-only
-// shape: no new trailing blank is introduced after the rule.
-TEST(Markdown, StandaloneHrKeepsLeadingBlankOnly) {
+// A standalone --- (no heading before it) carries blanks on both sides: the
+// rule's own leading blank plus the following paragraph's leading blank.
+TEST(Markdown, HrHasBlankOnBothSides) {
   auto rows = RenderLines("para\n\n---\n\nmore\n", {}, 60, 10);
   for (auto& line : rows) {
     while (!line.empty() && line.back() == ' ') {
       line.pop_back();
     }
   }
-  ASSERT_GE(rows.size(), 4u);
+  ASSERT_GE(rows.size(), 5u);
   EXPECT_EQ(rows[0], "para");
   EXPECT_EQ(rows[1], "");
   EXPECT_NE(rows[2].find("─"), std::string::npos)
       << "row 2 should be the rule, got: " << rows[2];
-  EXPECT_EQ(rows[3], "more");
+  EXPECT_EQ(rows[3], "");
+  EXPECT_EQ(rows[4], "more");
+}
+
+// Consecutive paragraphs are separated by a blank row: a single empty line in
+// the source yields a visible paragraph gap in the rendered output.
+TEST(Markdown, ConsecutiveParagraphsSeparatedByBlank) {
+  auto rows = RenderLines("first\n\nsecond\n", {}, 60, 10);
+  for (auto& line : rows) {
+    while (!line.empty() && line.back() == ' ') {
+      line.pop_back();
+    }
+  }
+  ASSERT_GE(rows.size(), 3u);
+  EXPECT_EQ(rows[0], "first");
+  EXPECT_EQ(rows[1], "");
+  EXPECT_EQ(rows[2], "second");
+}
+
+// Paragraphs inside a blockquote are separated by a blank row too (the quote
+// marker continues through the gap row).
+TEST(Markdown, BlockquoteParagraphsSeparatedByBlank) {
+  auto rows = RenderLines("> a\n>\n> b\n", {}, 60, 10);
+  for (auto& line : rows) {
+    while (!line.empty() && line.back() == ' ') {
+      line.pop_back();
+    }
+  }
+  ASSERT_GE(rows.size(), 3u);
+  EXPECT_NE(rows[0].find("a"), std::string::npos) << "row 0: " << rows[0];
+  EXPECT_EQ(rows[1], "│") << "gap row keeps only the marker: " << rows[1];
+  EXPECT_NE(rows[2].find("b"), std::string::npos) << "row 2: " << rows[2];
 }
 
 // Bold and italic text survive rendering.

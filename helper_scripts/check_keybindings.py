@@ -103,7 +103,7 @@ def main():
         doc = tmp.name
     ses = Session(doc, config_text=CONFIG, cols=COLS, rows=ROWS)
     try:
-        raw, ch, fg, bo, inv = ses.frame(keys=b"\x1b[H")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"\x1b[H")
         if show:
             dump("home", ch)
 
@@ -113,31 +113,31 @@ def main():
 
         top = position_of(status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"s")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"s")
         if show:
             dump("s-opens", ch)
         check("remapped search_open (s) opens the prompt",
               prompt_row(ch) >= 0)
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"filler" + ESC)
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"filler" + ESC)
         if show:
             dump("typed-esc", ch)
         check("typed query counts, Esc closes (default cancel kept)",
               prompt_row(ch) < 0 and "matches" in status(), status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"/")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"/")
         if show:
             dump("slash", ch)
         check("unbound / opens nothing", prompt_row(ch) < 0)
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"x")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"x")
         after_x = position_of(status())
         check("remapped scroll_down (x) moves one row",
               top is not None and after_x is not None and
               int(after_x[0]) == int(top[0]) + 1 and
               after_x[1] == top[1], status())
 
-        raw, ch, fg, bo, inv = ses.frame(keys=b"j")
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"j")
         after_j = position_of(status())
         check("unbound j moves nothing",
               after_j is not None and after_x is not None and

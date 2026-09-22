@@ -3,6 +3,9 @@ project(markit LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Enforce the strict ISO standard (-std=c++17) instead of the GNU dialect
+# (-std=gnu++17), so the build does not depend on the toolchain default.
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # yaml-cpp 0.8.0 declares cmake_minimum_required(3.5); newer CMake rejects
 # configuring a subproject below its minimum supported policy version unless
