@@ -49,6 +49,8 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+# ...except the repo-root build wrapper, which is tracked
+!/Makefile
 install_manifest.txt
 compile_commands.json
 
