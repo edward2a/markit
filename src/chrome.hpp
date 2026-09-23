@@ -10,7 +10,7 @@
 
 #include <ftxui/dom/elements.hpp>  // for Element
 
-#include "config.hpp"  // for WrapMode
+#include "display.hpp"  // for WrapMode
 
 namespace markit {
 

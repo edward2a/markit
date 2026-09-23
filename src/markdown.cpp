@@ -1,6 +1,8 @@
 // Implementation of markdown rendering for markit. See markdown.hpp.
 #include "markdown.hpp"
 
+#include "config.hpp"
+
 #include <md4c.h>
 
 #include <algorithm>  // for max
@@ -1816,6 +1818,11 @@ class Renderer {
 
 Element RenderMarkdown(const std::string& markdown, const Config& config) {
   return RenderMarkdown(markdown, config.theme, config.horizontal_wrap);
+}
+
+Element RenderMarkdown(const std::string& markdown) {
+  static const Config kDefaultConfig;
+  return RenderMarkdown(markdown, kDefaultConfig);
 }
 
 Element RenderMarkdown(const std::string& markdown, const Theme& theme,

@@ -11,17 +11,22 @@
 
 #include <ftxui/dom/elements.hpp>  // for Element
 
-#include "config.hpp"  // for Theme
+#include "display.hpp"  // for WrapMode
+#include "theme.hpp"  // for Theme
 
 namespace markit {
 
+struct Config;
+
 /// @brief Parse @p markdown and render it into an FTXUI Element.
 /// @param markdown UTF-8 markdown source text.
-/// @param config App settings: color theme and display mode. The default
-///        config wraps text to the viewport width.
+/// @param config App settings: color theme and display mode.
 /// @return A `vbox` Element suitable for display in the scroller.
 ftxui::Element RenderMarkdown(const std::string& markdown,
-                              const Config& config = Config{});
+                               const Config& config);
+
+// Render with the default theme and wrap mode.
+ftxui::Element RenderMarkdown(const std::string& markdown);
 
 // Narrow render-settings overload for callers that do not need the rest of
 // the interactive Config, such as the asynchronous search extractor.

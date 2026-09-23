@@ -8,6 +8,7 @@
 #include <ftxui/screen/screen.hpp>  // for Screen
 
 #include "markdown.hpp"
+#include "config.hpp"
 
 namespace {
 

@@ -16,7 +16,7 @@
 #include <ftxui/dom/requirement.hpp>  // for Requirement
 #include <ftxui/screen/screen.hpp>    // for Screen, Dimension
 
-#include "config.hpp"  // for markit::KeyBindings, MatchesKey
+#include "keybindings.hpp"  // for markit::KeyBindings, MatchesKey
 
 namespace ftxui {
 

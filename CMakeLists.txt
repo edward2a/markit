@@ -126,6 +126,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(MARKIT_BUILD_TESTS "Build markit tests" ON)
+option(MARKIT_BUILD_PUBLIC_HEADER_CHECKS
+       "Compile each public markit header in a standalone translation unit" ON)
 option(MARKIT_BUILD_DEPENDENCY_TOOLS
        "Build utility targets from vendored dependencies" ON)
 if (NOT MARKIT_BUILD_DEPENDENCY_TOOLS)
@@ -205,10 +207,29 @@ target_link_libraries(markit_core
   PUBLIC ftxui::component
   PUBLIC ftxui::dom
   PUBLIC ftxui::screen
-  PUBLIC md4c
-  PUBLIC yaml-cpp
+  PRIVATE md4c
+  PRIVATE yaml-cpp
   PRIVATE re2::re2
 )
+
+if (MARKIT_BUILD_PUBLIC_HEADER_CHECKS)
+  set(_markit_public_headers
+      config display keybindings theme markdown chrome scroller anchor search)
+  foreach (_markit_header IN LISTS _markit_public_headers)
+    set(_markit_header_source
+        "${CMAKE_CURRENT_BINARY_DIR}/markit_header_${_markit_header}.cpp")
+    file(GENERATE OUTPUT "${_markit_header_source}"
+         CONTENT "#include \"${_markit_header}.hpp\"\n")
+    add_library(markit-header-${_markit_header} OBJECT
+      "${_markit_header_source}")
+    target_include_directories(markit-header-${_markit_header}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(markit-header-${_markit_header}
+      PRIVATE ftxui::component
+      PRIVATE ftxui::dom
+      PRIVATE ftxui::screen)
+  endforeach()
+endif()
 
 add_executable(markit
   src/main.cpp
@@ -241,6 +262,7 @@ if (MARKIT_BUILD_TESTS)
     target_link_libraries(markit-tests
       PRIVATE markit_core
       PRIVATE GTest::gtest_main
+      PRIVATE yaml-cpp
     )
     add_test(NAME markit-tests COMMAND markit-tests)
   else()

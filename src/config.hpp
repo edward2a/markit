@@ -4,83 +4,12 @@
 #include <iosfwd>
 #include <optional>
 #include <string>
-#include <vector>
 
-#include <ftxui/component/event.hpp>
-#include <ftxui/screen/color.hpp>
+#include "display.hpp"
+#include "keybindings.hpp"
+#include "theme.hpp"
 
 namespace markit {
-
-// Centralized color scheme. Defaults match the original hardcoded colors so a
-// missing config file renders identically to the pre-config behavior.
-struct Theme {
-  ftxui::Color heading_h1 = ftxui::Color::Red;
-  ftxui::Color heading_h2 = ftxui::Color::Yellow;
-  ftxui::Color heading_h3 = ftxui::Color::Green;
-  ftxui::Color heading_h4 = ftxui::Color::CyanLight;
-  ftxui::Color link = ftxui::Color::CyanLight;
-  ftxui::Color inline_code_fg = ftxui::Color::Green;
-  ftxui::Color inline_code_bg = ftxui::Color::GrayDark;
-  ftxui::Color code_block_fg = ftxui::Color::GrayLight;
-  ftxui::Color code_block_bg = ftxui::Color::GrayDark;
-  ftxui::Color quote_marker = ftxui::Color::GrayDark;
-  // Whole-window background. Default ("none") keeps the terminal background.
-  ftxui::Color background = ftxui::Color::Default;
-};
-
-// Horizontal overflow handling for block-level content that exceeds the
-// viewport width.
-enum class WrapMode { Wrap, Scroll };
-
-// Key bindings for every interactive action, one key list per action.
-// Defaults preserve the historical hardcoded mappings (see DumpDefaultConfig).
-// A binding list may be emptied to unbind the action; overlaps between actions
-// that share an evaluation context (e.g. two content actions on the same key)
-// are rejected at load, while modal overlaps across contexts (Esc in both
-// `quit` and `search_cancel`, Enter in `search_accept`/`nav_activate`, the
-// scroll keys shared between content and nav) are allowed by design — the
-// event chain resolves them by precedence.
-struct KeyBindings {
-  // Main content view (handled by the scroller).
-  std::vector<ftxui::Event> scroll_up;
-  std::vector<ftxui::Event> scroll_down;
-  std::vector<ftxui::Event> page_up;
-  std::vector<ftxui::Event> page_down;
-  std::vector<ftxui::Event> goto_top;
-  std::vector<ftxui::Event> goto_bottom;
-  std::vector<ftxui::Event> pan_left;   // scroll display mode only.
-  std::vector<ftxui::Event> pan_right;  // scroll display mode only.
-  // Search and toggles (handled in main.cpp).
-  std::vector<ftxui::Event> search_open;
-  std::vector<ftxui::Event> search_next;
-  std::vector<ftxui::Event> search_prev;
-  std::vector<ftxui::Event> search_accept;  // while the prompt is open.
-  std::vector<ftxui::Event> search_cancel;  // while the prompt is open.
-  std::vector<ftxui::Event> quit;
-  std::vector<ftxui::Event> focus_switch;
-  std::vector<ftxui::Event> toggle_wrap;
-  std::vector<ftxui::Event> toggle_nav;
-  // Outline navigation (handled in main.cpp while nav_focused).
-  std::vector<ftxui::Event> nav_up;
-  std::vector<ftxui::Event> nav_down;
-  std::vector<ftxui::Event> nav_page_up;
-  std::vector<ftxui::Event> nav_page_down;
-  std::vector<ftxui::Event> nav_top;
-  std::vector<ftxui::Event> nav_bottom;
-  std::vector<ftxui::Event> nav_activate;
-
-  KeyBindings();  // fills every list with its default keys.
-};
-
-bool operator==(const KeyBindings& a, const KeyBindings& b);
-inline bool operator!=(const KeyBindings& a, const KeyBindings& b) {
-  return !(a == b);
-}
-
-// True when `event` equals any key in `keys` (FTXUI Event equality compares
-// the underlying input, so Character('q') matches the predefined Event::q).
-bool MatchesKey(const ftxui::Event& event,
-                const std::vector<ftxui::Event>& keys);
 
 // Top-level settings container. Additional per-area settings (e.g. a future
 // `display:` section) are added beside `theme`; dump/load operate on the whole

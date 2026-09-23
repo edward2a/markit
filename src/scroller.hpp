@@ -12,7 +12,7 @@
 #include <ftxui/component/component.hpp>        // for Component
 #include <ftxui/util/ref.hpp>                   // for Ref
 
-#include "config.hpp"  // for markit::KeyBindings
+#include "keybindings.hpp"  // for markit::KeyBindings
 
 namespace ftxui {
 

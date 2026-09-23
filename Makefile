@@ -32,14 +32,14 @@ test: build ## Build, then run the test suite.
 	ctest --test-dir $(BUILD_DIR) --output-on-failure
 
 bench: ## Build and run the opt-in performance benchmark.
-	$(MAKE) BUILD_DIR=build-bench BUILD_TYPE=RelWithDebInfo CMAKE_ARGS="-DMARKIT_BUILD_TESTS=OFF -DMARKIT_BUILD_BENCHMARKS=ON" build
+	$(MAKE) BUILD_DIR=build-bench BUILD_TYPE=RelWithDebInfo CMAKE_ARGS="-DMARKIT_BUILD_TESTS=OFF -DMARKIT_BUILD_BENCHMARKS=ON -DMARKIT_BUILD_PUBLIC_HEADER_CHECKS=OFF" build
 	./build-bench/markit-bench $(BENCH_ARGS)
 
 release: ## Build an optimized production tree without tests.
-	$(MAKE) BUILD_DIR=build-release BUILD_TYPE=Release CMAKE_ARGS="-DMARKIT_BUILD_TESTS=OFF -DMARKIT_BUILD_BENCHMARKS=OFF -DMARKIT_BUILD_DEPENDENCY_TOOLS=OFF" build
+	$(MAKE) BUILD_DIR=build-release BUILD_TYPE=Release CMAKE_ARGS="-DMARKIT_BUILD_TESTS=OFF -DMARKIT_BUILD_BENCHMARKS=OFF -DMARKIT_BUILD_PUBLIC_HEADER_CHECKS=OFF -DMARKIT_BUILD_DEPENDENCY_TOOLS=OFF" build
 
 minsize: ## Build a size-oriented production tree without tests.
-	$(MAKE) BUILD_DIR=build-minsize BUILD_TYPE=MinSizeRel CMAKE_ARGS="-DMARKIT_BUILD_TESTS=OFF -DMARKIT_BUILD_BENCHMARKS=OFF -DMARKIT_BUILD_DEPENDENCY_TOOLS=OFF" build
+	$(MAKE) BUILD_DIR=build-minsize BUILD_TYPE=MinSizeRel CMAKE_ARGS="-DMARKIT_BUILD_TESTS=OFF -DMARKIT_BUILD_BENCHMARKS=OFF -DMARKIT_BUILD_PUBLIC_HEADER_CHECKS=OFF -DMARKIT_BUILD_DEPENDENCY_TOOLS=OFF" build
 
 size-report: ## Print size information for the selected build tree.
 	size $(BUILD_DIR)/markit
