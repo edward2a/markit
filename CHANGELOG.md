@@ -26,6 +26,7 @@ Versions are ordered newest-first: new change lines append inside the top sectio
 - 2026-09-23T01:26:17Z - mod - Reduce Markdown renderer allocation churn by keeping md4c callback text as string views until durable fragments are created, slicing HTML in place, constructing code lines directly, using append-based wrapping, and caching composed style keys; the full Markdown suite and performance benchmark remain green
 - 2026-09-23T01:29:52Z - mod - Close the synchronous wrap/scroll toggle performance finding as deferred after final benchmark samples measured about 2.9 ms small, 32.8 ms wrapped, 19.7 ms wide, and 535 ms on the intentionally large 210 KB/1,200-section stress fixture; no asynchronous toggle state machine was added
 - 2026-09-23T01:33:21Z - add - Record final RelWithDebInfo benchmark and resource baselines: about 141608 KB peak RSS for the complete benchmark process, 2778736-byte Release binary with 2203143 bytes of text, and 1783680-byte MinSizeRel binary with 1192084 bytes of text
+- 2026-09-23T01:35:20Z - mod - Defer the literal-search fast path and search index after final worker measurements showed about 450 us for a large-fixture scan and 3.5 ms for complete query churn; current background scans do not justify additional search memory or complexity
 
 ## 0.0.7 - 2026-09-21T22:33:33Z
 
