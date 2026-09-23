@@ -43,6 +43,7 @@ bool IsBlankCell(const ftxui::Cell& cell) {
 // Collapse leading/trailing whitespace and internal runs to single spaces.
 std::string Normalize(const std::string& s) {
   std::string out;
+  out.reserve(s.size());
   bool pending_space = false;
   bool started = false;
   for (char c : s) {
@@ -63,40 +64,47 @@ std::string Normalize(const std::string& s) {
   return out;
 }
 
-std::vector<std::string> SplitWords(const std::string& s) {
-  std::vector<std::string> words;
-  std::string cur;
+int CountWords(const std::string& s, int limit) {
+  int count = 0;
+  bool in_word = false;
   for (char c : s) {
     if (c == ' ') {
-      if (!cur.empty()) {
-        words.push_back(cur);
-        cur.clear();
+      in_word = false;
+    } else if (!in_word) {
+      in_word = true;
+      if (++count == limit) {
+        return count;
       }
-    } else {
-      cur += c;
     }
   }
-  if (!cur.empty()) {
-    words.push_back(cur);
-  }
-  return words;
+  return count;
 }
 
-std::string JoinWords(const std::vector<std::string>& words, int count) {
+std::string Fingerprint(const std::string& normalized) {
   std::string out;
-  const int n = std::min<int>(count, words.size());
-  for (int i = 0; i < n; ++i) {
-    if (i > 0) {
+  out.reserve(normalized.size());
+  int words = 0;
+  std::size_t start = 0;
+  while (start < normalized.size() && words < kAnchorWords) {
+    while (start < normalized.size() && normalized[start] == ' ') {
+      ++start;
+    }
+    if (start == normalized.size()) {
+      break;
+    }
+    const std::size_t end = normalized.find(' ', start);
+    if (words > 0) {
       out += ' ';
     }
-    out += words[i];
+    out.append(normalized, start,
+               end == std::string::npos ? std::string::npos : end - start);
+    ++words;
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
   }
   return out;
-}
-
-// First up-to-10 words; short rows contribute their whole trimmed text.
-std::string Fingerprint(const std::string& normalized) {
-  return JoinWords(SplitWords(normalized), kAnchorWords);
 }
 
 bool StartsWithWord(const std::string& text, const std::string& fp) {
@@ -287,41 +295,57 @@ std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
   return rows;
 }
 
-// Locate heading rows in order: row contains the heading's fingerprint and is
-// bold. Each search starts after the previous hit, so duplicate titles map by
-// occurrence rank. Misses are skipped without consuming position.
-std::vector<int> FindHeadingRows(const std::vector<Row>& rows,
-                                 const std::vector<Heading>& headings) {
-  std::vector<int> found;
+std::vector<std::string> BuildHeadingFingerprints(
+    const std::vector<Heading>& headings) {
+  std::vector<std::string> fingerprints;
+  fingerprints.reserve(headings.size());
+  for (const Heading& heading : headings) {
+    fingerprints.push_back(Fingerprint(Normalize(heading.text)));
+  }
+  return fingerprints;
+}
+
+// Match heading fingerprints in order. Each search starts after the previous
+// hit, so duplicate titles map by occurrence rank. Misses are skipped without
+// consuming position. Both toggle anchoring and nav mapping use this exact
+// implementation to keep their section boundaries identical.
+template <typename Callback>
+void MatchHeadingRows(const std::vector<Row>& rows,
+                      const std::vector<std::string>& fingerprints,
+                      Callback&& callback) {
   std::size_t pos = 0;
-  for (const Heading& h : headings) {
-    const std::string fp = Fingerprint(Normalize(h.text));
+  for (std::size_t i = 0; i < fingerprints.size(); ++i) {
+    const std::string& fp = fingerprints[i];
     if (fp.empty()) {
       continue;
     }
     for (std::size_t r = pos; r < rows.size(); ++r) {
       if (rows[r].bold && ContainsWordSeq(rows[r].text, fp)) {
-        found.push_back(static_cast<int>(r));
+        callback(r, i);
         pos = r + 1;
         break;
       }
     }
   }
+}
+
+std::vector<int> FindHeadingRows(
+    const std::vector<Row>& rows,
+    const std::vector<std::string>& fingerprints) {
+  std::vector<int> found;
+  MatchHeadingRows(rows, fingerprints,
+                   [&](std::size_t row, std::size_t /*heading*/) {
+                     found.push_back(static_cast<int>(row));
+                   });
   return found;
 }
 
 // Section id = number of heading boundaries at or above the row. The
 // preamble (before the first heading) is section 0 when headings exist.
 int SectionId(const std::vector<int>& boundaries, int row) {
-  int id = 0;
-  for (int b : boundaries) {
-    if (b <= row) {
-      ++id;
-    } else {
-      break;
-    }
-  }
-  return id;
+  return static_cast<int>(std::upper_bound(boundaries.begin(), boundaries.end(),
+                                            row) -
+                           boundaries.begin());
 }
 
 int Proportional(int old_selected, int old_max, int new_max) {
@@ -508,10 +532,14 @@ int MapTogglePosition(const ftxui::Element& old_tree,
   // the exact wide rematch below.
   const bool fp_truncated =
       old_narrow[idx].clipped &&
-      SplitWords(old_narrow[idx].text).size() < kAnchorWords;
+      CountWords(old_narrow[idx].text, kAnchorWords) < kAnchorWords;
 
-  std::vector<int> old_bounds = FindHeadingRows(old_narrow, headings);
-  std::vector<int> new_bounds = FindHeadingRows(new_narrow, headings);
+  const std::vector<std::string> heading_fingerprints =
+      BuildHeadingFingerprints(headings);
+  std::vector<int> old_bounds =
+      FindHeadingRows(old_narrow, heading_fingerprints);
+  std::vector<int> new_bounds =
+      FindHeadingRows(new_narrow, heading_fingerprints);
 
   // (delta is 0 here: heading rows are never blank.)
   if (auto hit = HeadingAnchor(old_bounds, new_bounds, idx, delta,
@@ -544,7 +572,7 @@ int MapTogglePosition(const ftxui::Element& old_tree,
       // Row structure changed with width: fall back to proportional.
       return std::clamp(est + delta, 0, new_max);
     }
-    old_bounds = FindHeadingRows(*wide_old, headings);
+    old_bounds = FindHeadingRows(*wide_old, heading_fingerprints);
   } else {
     wide_new = RenderRows(new_tree, NaturalWidth(new_min_x, viewport_width),
                           new_min_y, new_min_x, viewport_height,
@@ -552,7 +580,7 @@ int MapTogglePosition(const ftxui::Element& old_tree,
     if (wide_new->size() != new_narrow.size()) {
       return std::clamp(est + delta, 0, new_max);
     }
-    new_bounds = FindHeadingRows(*wide_new, headings);
+    new_bounds = FindHeadingRows(*wide_new, heading_fingerprints);
   }
   const std::vector<Row>& old_rows = wide_old ? *wide_old : old_narrow;
   const std::vector<Row>& new_rows = wide_new ? *wide_new : new_narrow;
@@ -585,23 +613,13 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
   if (rows.empty()) {
     return located;
   }
-  // Same ordered search as FindHeadingRows, but records the heading index
-  // (into `headings`, i.e. nav rows) so duplicates resolve by rank and
-  // empty-fingerprint headings are skipped without shifting later indices.
-  std::size_t pos = 0;
-  for (std::size_t i = 0; i < headings.size(); ++i) {
-    const std::string fp = Fingerprint(Normalize(headings[i].text));
-    if (fp.empty()) {
-      continue;
-    }
-    for (std::size_t r = pos; r < rows.size(); ++r) {
-      if (rows[r].bold && ContainsWordSeq(rows[r].text, fp)) {
-        located.emplace_back(static_cast<int>(r), static_cast<int>(i));
-        pos = r + 1;
-        break;
-      }
-    }
-  }
+  const std::vector<std::string> heading_fingerprints =
+      BuildHeadingFingerprints(headings);
+  MatchHeadingRows(
+      rows, heading_fingerprints,
+      [&](std::size_t row, std::size_t heading) {
+        located.emplace_back(static_cast<int>(row), static_cast<int>(heading));
+      });
   return located;
 }
 

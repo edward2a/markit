@@ -6,8 +6,9 @@
 #include <functional>  // for function
 #include <iostream>
 #include <iterator>
-#include <memory>  // for unique_ptr, make_unique
+#include <memory>  // for shared_ptr, make_shared
 #include <mutex>  // for mutex
+#include <optional>  // for optional
 #include <string>
 #include <thread>  // for thread
 #include <utility>  // for pair
@@ -190,44 +191,66 @@ int main(int argc, char** argv) {
   std::vector<std::pair<int, int>> hl_map;
 
   // Search state. Rows are plain-text copies of the live tree's visible rows
-  // (indices align 1:1 with scroll offsets); matches is the row list for the
-  // last compiled query; `search_pos` the index of the current match (-1
-  // before the first jump); `search_invalid` flags a query that failed to
-  // compile; `search_pending` flags rows not yet extracted. An empty query
-  // is "search inactive" and matches nothing.
+  // (indices align 1:1 with scroll offsets); matches and the compiled matcher
+  // are immutable worker results; `search_pos` is the index of the current
+  // match (-1 before the first jump); `search_invalid` flags a query that
+  // failed to compile; `search_pending` flags a result not yet adopted. An
+  // empty query is "search inactive" and matches nothing.
   //
   // Row extraction (one full offscreen layout) runs on ONE short-lived
   // worker thread so it never blocks input. The worker owns its private
   // tree, rebuilt from the immutable `contents`; the loop shares only
   // immutable inputs plus the handoff below. The loop side uses try_lock
-  // exclusively and at most one worker runs at a time; stale generations
-  // discard on landing.
+  // exclusively and at most one worker runs at a time; stale query, layout,
+  // and document generations are discarded on landing.
   std::mutex search_mu;
-  struct SearchRows {
-    std::vector<std::string> rows;
+  struct SearchResult {
+    uint64_t generation = 0;
+    uint64_t document_generation = 0;
+    uint64_t layout_generation = 0;
     int viewport = -1;
     bool scroll = false;
+    std::string query;
+    bool case_sensitive = false;
+    std::shared_ptr<const std::vector<std::string>> rows;
+    std::shared_ptr<const markit::Re2Matcher> matcher;
+    std::vector<int> matches;
+    bool invalid = false;
   };
-  SearchRows search_bg;  // worker handoff, guarded by search_mu.
-  bool search_rows_ready = false;  // guarded by search_mu.
+  struct SearchRowsResult {
+    uint64_t document_generation = 0;
+    uint64_t layout_generation = 0;
+    int viewport = -1;
+    bool scroll = false;
+    std::shared_ptr<const std::vector<std::string>> rows;
+  };
+  std::optional<SearchResult> search_bg;  // guarded by search_mu.
+  bool search_result_ready = false;  // guarded by search_mu.
+  std::optional<SearchRowsResult> search_rows_bg;  // guarded by search_mu.
+  bool search_rows_result_ready = false;  // guarded by search_mu.
   std::atomic<uint64_t> search_gen{0};  // generation of the flight/result.
+  std::atomic<uint64_t> search_document_gen{1};
+  std::atomic<uint64_t> search_layout_gen{0};
   std::atomic<bool> search_worker_running{false};
   std::thread search_worker;
-  uint64_t search_adopted_gen = 0;  // generation currently in search_rows.
-  std::vector<std::string> search_rows;
+  std::shared_ptr<const std::vector<std::string>> search_rows;
   int search_w_viewport = -1;  // inputs the rows were extracted for.
   bool search_w_scroll = false;
   bool search_rows_valid = false;
   std::string search_compiled;
   bool search_case = false;
-  std::unique_ptr<markit::Re2Matcher> search_matcher;
-  std::string search_matcher_query;
-  bool search_matcher_case = false;
+  std::shared_ptr<const markit::Re2Matcher> search_matcher;
   bool search_matcher_ready = false;
   bool search_invalid = false;
   bool search_pending = false;
   std::vector<int> search_matches;
   int search_pos = -1;
+  std::string search_requested_query;
+  bool search_requested_case = false;
+  uint64_t search_requested_document = 0;
+  int search_requested_viewport = -1;
+  bool search_requested_scroll = false;
+  bool search_request_seen = false;
 
   // Live-view mark for the current match (SearchHighlight overlay): the
   // target row plus its match byte spans, recomputed in
@@ -350,45 +373,135 @@ int main(int argc, char** argv) {
 
   auto screen = App::Fullscreen();
 
-  // Spawn the extraction worker for the current tree/width, unless one is
-  // already running (its result is adopted or discarded by generation when
-  // it lands). Fire-and-forget: rows don't depend on the query, so typing
-  // never spawns workers — only tree/width changes do. Callers ensure the
-  // viewport is usable.
+  // Keep the worker generation tied to every input that can change its
+  // result. Query typing and terminal resize invalidate an older flight even
+  // when the replacement worker cannot start until the old one exits.
+  auto sync_search_request = [&] {
+    const uint64_t document = search_document_gen.load();
+    const bool layout_changed =
+        !search_request_seen || search_requested_document != document ||
+        search_requested_viewport != viewport_width ||
+        search_requested_scroll != hscroll;
+    if (!layout_changed && search_request_seen &&
+        search_requested_query == search_query &&
+        search_requested_case == config.search_case_sensitive) {
+      return;
+    }
+    search_request_seen = true;
+    search_requested_query = search_query;
+    search_requested_case = config.search_case_sensitive;
+    search_requested_document = document;
+    search_requested_viewport = viewport_width;
+    search_requested_scroll = hscroll;
+    if (layout_changed) {
+      search_layout_gen.fetch_add(1);
+    }
+    search_gen.fetch_add(1);
+    std::lock_guard<std::mutex> lock(search_mu);
+    if (layout_changed) {
+      search_rows_bg.reset();
+      search_rows_result_ready = false;
+    } else if (search_result_ready && search_bg && search_bg->rows) {
+      // A completed scan for the previous query still produced reusable rows.
+      // Preserve only that immutable layout result; its query/matches are
+      // stale and are intentionally discarded.
+      search_rows_bg = SearchRowsResult{
+          search_bg->document_generation, search_bg->layout_generation,
+          search_bg->viewport, search_bg->scroll, search_bg->rows};
+      search_rows_result_ready = true;
+    }
+    search_bg.reset();
+    search_result_ready = false;
+  };
+
+  // The worker owns both layout extraction and query matching. Results carry
+  // immutable rows and the compiled matcher, so the loop never copies rows or
+  // rescans the document while handling input.
   auto spawn_search_worker = [&] {
-    const uint64_t gen = search_gen.load() + 1;
-    search_gen.store(gen);
+    sync_search_request();
+    const uint64_t gen = search_gen.load();
+    const uint64_t document = search_document_gen.load();
+    const uint64_t layout = search_layout_gen.load();
     const markit::Theme worker_theme = content_cfg.theme;
     const markit::WrapMode worker_mode = content_cfg.horizontal_wrap;
     const std::string* source = &contents;
-    const int width =
-        markit::SearchExtractWidth(cached_content, viewport_width, hscroll);
     const int vw = viewport_width;
     const bool sc = hscroll;
     const int hint = std::max(1, content_height);
+    const std::string query = search_query;
+    const bool case_sensitive = config.search_case_sensitive;
+    const bool rows_current =
+        search_rows && search_rows_valid && search_w_viewport == vw &&
+        search_w_scroll == sc;
+    // A query-only revision reuses immutable rows and must not recompute the
+    // tree requirement on the UI loop. Width is ignored in that case.
+    const int width = rows_current
+                          ? std::max(1, viewport_width)
+                          : markit::SearchExtractWidth(cached_content, vw, sc);
+    const std::shared_ptr<const std::vector<std::string>> input_rows =
+        rows_current ? search_rows : nullptr;
     if (search_worker.joinable()) {
       search_worker.join();  // finished flight only (never a live one).
     }
     search_worker_running.store(true);
     search_worker = std::thread(
-        [&, gen, source, worker_theme, worker_mode, vw, sc, width, hint] {
-          // Private tree: RenderMarkdown is a pure function of its inputs and
-          // FTXUI renders touch no shared mutable state, so this is race-free
-          // by construction. (The empty-file dim decorator changes style only,
-          // never text, so it is skipped here.)
-          ftxui::Element tree =
-              markit::RenderMarkdown(*source, worker_theme, worker_mode);
-          std::vector<std::string> rows =
-              markit::RenderTextRows(tree, width, hint);
+        [&, gen, document, layout, source, worker_theme, worker_mode, vw, sc,
+         width, hint, query, case_sensitive, input_rows] {
+          std::shared_ptr<const std::vector<std::string>> rows = input_rows;
+          if (!rows) {
+            // Private tree: RenderMarkdown is a pure function of its inputs
+            // and FTXUI renders touch no shared mutable state. The empty-file
+            // dim decorator changes style only, never text, so it is skipped.
+            ftxui::Element tree =
+                markit::RenderMarkdown(*source, worker_theme, worker_mode);
+            auto extracted = std::make_shared<std::vector<std::string>>(
+                markit::RenderTextRows(tree, width, hint));
+            rows = std::move(extracted);
+          }
+
+          std::shared_ptr<const markit::Re2Matcher> matcher;
+          std::vector<int> matches;
+          bool invalid = false;
+          if (!query.empty()) {
+            matcher = std::make_shared<markit::Re2Matcher>(query,
+                                                           case_sensitive);
+            invalid = !matcher->ok();
+            if (!invalid) {
+              matches = markit::FindMatches(*rows, *matcher);
+            }
+          }
+
+          SearchResult result;
+          result.generation = gen;
+          result.document_generation = document;
+          result.layout_generation = layout;
+          result.viewport = vw;
+          result.scroll = sc;
+          result.query = query;
+          result.case_sensitive = case_sensitive;
+          result.rows = std::move(rows);
+          result.matcher = std::move(matcher);
+          result.matches = std::move(matches);
+          result.invalid = invalid;
           {
             std::lock_guard<std::mutex> lock(search_mu);
-            if (gen == search_gen.load()) {
-              search_bg = SearchRows{std::move(rows), vw, sc};
-              search_rows_ready = true;
+            const bool layout_current =
+                document == search_document_gen.load() &&
+                layout == search_layout_gen.load();
+            if (gen == search_gen.load() && layout_current) {
+              search_bg = std::move(result);
+              search_result_ready = true;
               // Wake the loop: FTXUI renders on demand, so without this the
-              // adoption (and the "..." -> count flip) would wait for the next
-              // keypress. PostEvent is thread-safe; Custom matches no binding
-              // and falls through harmlessly. Stale generations stay silent.
+              // adoption and the "..." -> count flip would wait for input.
+              screen.PostEvent(Event::Custom);
+            } else if (layout_current && result.rows) {
+              // The query became stale while layout work was running. Keep
+              // the immutable rows for the latest query, but never publish
+              // the stale matcher or match indices.
+              search_rows_bg = SearchRowsResult{
+                  result.document_generation, result.layout_generation,
+                  result.viewport, result.scroll, std::move(result.rows)};
+              search_rows_result_ready = true;
               screen.PostEvent(Event::Custom);
             }
           }
@@ -397,33 +510,105 @@ int main(int argc, char** argv) {
     );
   };
 
-  // Ensure a rows extraction is coming for the current tree/width: spawn a
-  // worker unless the rows are already valid or one is already running.
+  // Ensure a current row/match result is coming. A blank query still permits
+  // a row-only prewarm when the prompt opens; non-blank queries include the
+  // matcher and full scan in the same worker result.
   auto ensure_search_rows = [&] {
+    sync_search_request();
     if (!cached_content || viewport_width < 1 || viewport_height < 1) {
       return;
     }
-    if ((!search_rows_valid || search_w_viewport != viewport_width ||
-         search_w_scroll != hscroll) &&
-        !search_worker_running.load()) {
+    const bool rows_current =
+        search_rows && search_rows_valid &&
+        search_w_viewport == viewport_width && search_w_scroll == hscroll;
+    const bool query_current =
+        search_query.empty() ||
+        (search_compiled == search_query &&
+         search_case == config.search_case_sensitive &&
+         (search_invalid || search_matcher_ready));
+    bool result_ready = false;
+    bool rows_result_ready = false;
+    {
+      std::lock_guard<std::mutex> lock(search_mu);
+      result_ready = search_result_ready;
+      rows_result_ready = search_rows_result_ready;
+    }
+    if ((!rows_current || !query_current) &&
+        !search_worker_running.load() && !result_ready && !rows_result_ready) {
       spawn_search_worker();
     }
   };
 
-  // Recompute the search match state plus the live-view mark. Rows arrive
-  // from the worker (adopted without ever blocking); matches are a regex
-  // re-scan of the rows on the loop (microseconds), so typing never blocks.
-  // A changed query drops the match cursor; a changed tree only clamps it.
-  // Matches outlive the prompt: closing it hides the UI but keeps the query
-  // so n/N keep navigating.
-  //
-  // Split from the worker spawn (which needs `screen`, declared later):
-  // assigned to the forward hook above so the content renderer can refresh
-  // first. This stays spawn-free; refresh_search below adds the spawn side.
+  // Adopt the worker result and refresh only the single-row highlight on the
+  // loop. Matching itself is generation-guarded and never runs here.
   refresh_search_state = [&] {
+    sync_search_request();
+    bool rows_rebuilt = false;
+    std::optional<SearchRowsResult> rows_result;
+    std::optional<SearchResult> result;
+    {
+      std::unique_lock<std::mutex> lock(search_mu, std::try_to_lock);
+      if (lock.owns_lock() && search_result_ready) {
+        result = std::move(search_bg);
+        search_bg.reset();
+        search_result_ready = false;
+      }
+      if (lock.owns_lock() && search_rows_result_ready) {
+        rows_result = std::move(search_rows_bg);
+        search_rows_bg.reset();
+        search_rows_result_ready = false;
+      }
+    }
+    // The worker publishes before returning, so a ready handoff means only
+    // its short thread epilogue remains. Join before the UI calls RE2 on the
+    // shared immutable matcher; this also keeps dependency thread-local
+    // teardown out of the highlight path.
+    if ((result || rows_result) && search_worker.joinable()) {
+      search_worker.join();
+    }
+    if (rows_result &&
+        rows_result->document_generation == search_document_gen.load() &&
+        rows_result->layout_generation == search_layout_gen.load() &&
+        rows_result->viewport == viewport_width &&
+        rows_result->scroll == hscroll) {
+      search_rows = std::move(rows_result->rows);
+      search_w_viewport = viewport_width;
+      search_w_scroll = hscroll;
+      search_rows_valid = static_cast<bool>(search_rows);
+      rows_rebuilt = true;
+    }
+    if (result && result->generation == search_gen.load() &&
+        result->document_generation == search_document_gen.load() &&
+        result->layout_generation == search_layout_gen.load() &&
+        result->viewport == viewport_width && result->scroll == hscroll &&
+        result->query == search_query &&
+        result->case_sensitive == config.search_case_sensitive) {
+      const bool query_changed =
+          search_compiled != result->query ||
+          search_case != result->case_sensitive;
+      search_rows = std::move(result->rows);
+      search_w_viewport = result->viewport;
+      search_w_scroll = result->scroll;
+      search_rows_valid = static_cast<bool>(search_rows);
+      rows_rebuilt = true;
+      search_matcher = std::move(result->matcher);
+      search_matcher_ready = static_cast<bool>(search_matcher);
+      search_matches = std::move(result->matches);
+      search_invalid = result->invalid;
+      search_compiled = result->query;
+      search_case = result->case_sensitive;
+      search_pending = false;
+      if (query_changed) {
+        search_pos = -1;
+      } else {
+        search_pos = std::clamp(
+            search_pos, -1, static_cast<int>(search_matches.size()) - 1);
+      }
+    }
+
     if (search_query.empty()) {
-      // Inactive: drop matches but keep extracted rows and any flight —
-      // rows don't depend on the query, so reopening is instant.
+      // Inactive: drop matches but keep extracted rows and any flight so
+      // reopening the prompt can reuse the immutable row set.
       search_matches.clear();
       search_pos = -1;
       search_invalid = false;
@@ -431,8 +616,6 @@ int main(int argc, char** argv) {
       search_compiled.clear();
       search_case = false;
       search_matcher.reset();
-      search_matcher_query.clear();
-      search_matcher_case = false;
       search_matcher_ready = false;
       hl_match_row = -1;
       hl_match_spans.clear();
@@ -442,56 +625,21 @@ int main(int argc, char** argv) {
     if (!cached_content || viewport_width < 1 || viewport_height < 1) {
       return;
     }
-    // Adopt worker rows without ever blocking the loop; a missed adoption
-    // retries next frame.
-    bool rows_rebuilt = false;
-    {
-      std::unique_lock<std::mutex> lock(search_mu, std::try_to_lock);
-      if (lock.owns_lock() && search_rows_ready &&
-          search_adopted_gen != search_gen.load()) {
-        search_rows = std::move(search_bg.rows);
-        search_w_viewport = search_bg.viewport;
-        search_w_scroll = search_bg.scroll;
-        search_rows_ready = false;
-        search_adopted_gen = search_gen.load();
-        search_rows_valid = true;
-        rows_rebuilt = true;
-      }
-    }
     // Rows stale for the current tree/width? The old matches belong to
-    // another layout, so drop them and show pending; refresh_search (below)
-    // ensures a worker, since spawning needs `screen`.
-    if (!search_rows_valid || search_w_viewport != viewport_width ||
-        search_w_scroll != hscroll) {
+    // another layout, so drop them and show pending; refresh_search below
+    // ensures a worker for the current request.
+    if (!search_rows_valid || !search_rows ||
+        search_w_viewport != viewport_width || search_w_scroll != hscroll) {
       search_rows_valid = false;
       search_matches.clear();
+      search_matcher.reset();
+      search_matcher_ready = false;
     }
-    // Compile once per query/case revision. This path runs from both the
-    // content and status renderers in the same frame.
-    if (!search_matcher_ready ||
-        search_matcher_query != search_query ||
-        search_matcher_case != config.search_case_sensitive) {
-      search_matcher = std::make_unique<markit::Re2Matcher>(
-          search_query, config.search_case_sensitive);
-      search_matcher_query = search_query;
-      search_matcher_case = config.search_case_sensitive;
-      search_matcher_ready = true;
-    }
-    const markit::Re2Matcher& matcher = *search_matcher;
-    if (!matcher.ok()) {
-      search_invalid = true;
-      search_pending = false;
-      search_matches.clear();
-      search_pos = -1;
-      search_compiled = search_query;
-      search_case = config.search_case_sensitive;
-      hl_match_row = -1;
-      hl_match_spans.clear();
-      hl_match_query.clear();
-      return;
-    }
-    search_invalid = false;
-    if (!search_rows_valid) {
+    const bool query_current =
+        search_compiled == search_query &&
+        search_case == config.search_case_sensitive &&
+        (search_invalid || search_matcher_ready);
+    if (!search_rows_valid || !query_current) {
       search_pending = true;
       hl_match_row = -1;
       hl_match_spans.clear();
@@ -499,23 +647,6 @@ int main(int argc, char** argv) {
       return;
     }
     search_pending = false;
-    const bool query_changed = (search_compiled != search_query ||
-                                search_case != config.search_case_sensitive);
-    if (rows_rebuilt || query_changed) {
-      search_matches = markit::FindMatches(search_rows, matcher);
-      search_compiled = search_query;
-      search_case = config.search_case_sensitive;
-      if (query_changed) {
-        search_pos = -1;
-      } else {
-        search_pos = std::clamp(search_pos, -1,
-                                static_cast<int>(search_matches.size()) - 1);
-      }
-    }
-    // The live-view mark follows the current match: the jumped-to row once
-    // search_pos sits on a match, else the row Enter/n would land on first
-    // (strict NextMatch from the top of view, mirroring goto_match).
-    // Spans cover one row only, so typing costs a single-row scan.
     const int count = static_cast<int>(search_matches.size());
     int target = -1;
     if (count > 0) {
@@ -523,23 +654,23 @@ int main(int argc, char** argv) {
                    ? search_matches[search_pos]
                    : markit::NextMatch(search_matches, selected - 1, +1);
     }
-    if (target < 0 || target >= static_cast<int>(search_rows.size())) {
+    if (target < 0 || target >= static_cast<int>(search_rows->size()) ||
+        !search_matcher) {
       hl_match_row = -1;
       hl_match_spans.clear();
       hl_match_query.clear();
     } else if (target != hl_match_row || hl_match_query != search_query ||
                hl_match_case != config.search_case_sensitive ||
                rows_rebuilt) {
-      hl_match_spans = matcher.FindSpans(search_rows[target]);
+      hl_match_spans = search_matcher->FindSpans((*search_rows)[target]);
       hl_match_row = target;
       hl_match_query = search_query;
       hl_match_case = config.search_case_sensitive;
     }
   };
 
-  // Full search refresh for event/status paths: match state plus worker
-  // spawn for stale rows. ensure_search_rows no-ops unless rows are
-  // missing/stale and no worker is flying.
+  // Full search refresh for event/status paths: adopt worker state, then
+  // schedule the current query/layout if its result is still pending.
   auto refresh_search = [&] {
     refresh_search_state();
     if (!search_query.empty()) {
@@ -775,6 +906,7 @@ int main(int argc, char** argv) {
       const bool old_is_scroll = hscroll;
       Element old_tree = cached_content;
       hscroll = !hscroll;
+      search_document_gen.fetch_add(1);
       content_cfg.horizontal_wrap =
           hscroll ? markit::WrapMode::Scroll : markit::WrapMode::Wrap;
       selected_x = 0;  // re-anchor horizontally on mode switch.

@@ -108,6 +108,34 @@ Summary Measure(const Options& options, const std::function<std::size_t()>& fn) 
   return {samples[median], samples[p95]};
 }
 
+std::size_t QueryChurn(const std::vector<std::string>& rows) {
+  // Incremental typing, backspacing, and an invalid expression model the
+  // query revisions that can arrive while the prompt is open.
+  const std::vector<std::string> queries = {
+      "n", "ne", "nee", "need", "needle", "needl", "nee", "ne", "([",
+      "needle", "[needle]", "needle"};
+  std::size_t result = 0;
+  for (const std::string& query : queries) {
+    markit::Re2Matcher matcher(query);
+    result += matcher.ok() ? markit::FindMatches(rows, matcher).size() : 1U;
+  }
+  return result;
+}
+
+std::vector<markit::Heading> HeadingStressFixture(
+    const std::vector<markit::Heading>& headings) {
+  std::vector<markit::Heading> stress;
+  stress.reserve(headings.size() * 3 + 64);
+  for (int i = 0; i < 64; ++i) {
+    stress.push_back({1, "missing heading " + std::to_string(i)});
+  }
+  for (const markit::Heading& heading : headings) {
+    stress.push_back(heading);
+    stress.push_back(heading);  // duplicate occurrence-rank lookup.
+  }
+  return stress;
+}
+
 void PrintResult(const std::string& name, const Fixture& fixture,
                  const Options& options, const Summary& summary) {
   std::cout << name << ',' << fixture.name << ',' << fixture.markdown.size()
@@ -161,6 +189,32 @@ void BenchmarkFixture(const Fixture& fixture, const Options& options) {
             /*old_is_scroll=*/true, &new_height));
       }));
 
+  const auto headings = markit::ExtractHeadings(fixture.markdown);
+  const auto scroll_rows = markit::RenderTextRows(
+      scroll_tree, scroll_width, scroll_hint);
+  const int toggle_selected =
+      scroll_rows.empty() ? 0 : static_cast<int>(scroll_rows.size() / 2);
+  PrintResult(
+      "toggle_path", fixture, options,
+      Measure(options, [&] {
+        const auto old_tree = markit::RenderMarkdown(fixture.markdown, scroll);
+        const auto new_tree = markit::RenderMarkdown(fixture.markdown, wrap);
+        int new_height = 0;
+        return static_cast<std::size_t>(markit::MapTogglePosition(
+            old_tree, new_tree, headings, toggle_selected,
+            fixture.viewport_width, 24, /*old_is_scroll=*/true, &new_height));
+      }));
+
+  const auto heading_stress = HeadingStressFixture(headings);
+  PrintResult(
+      "heading_mapping", fixture, options,
+      Measure(options, [&] {
+        return markit::LocateHeadingRows(
+                   wrap_tree, heading_stress, fixture.viewport_width, 24,
+                   /*is_scroll=*/false)
+            .size();
+      }));
+
   const auto rows = markit::RenderTextRows(wrap_tree, fixture.viewport_width,
                                            wrap_hint);
   std::cerr << "# fixture=" << fixture.name << " wrap_hint=" << wrap_hint
@@ -180,6 +234,10 @@ void BenchmarkFixture(const Fixture& fixture, const Options& options) {
       Measure(options, [&] {
         return markit::FindMatches(rows, matcher).size();
       }));
+
+  PrintResult(
+      "query_churn", fixture, options,
+      Measure(options, [&] { return QueryChurn(rows); }));
 }
 
 bool ParsePositive(const char* value, int* out) {

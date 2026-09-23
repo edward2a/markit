@@ -34,13 +34,13 @@ std::string Attr(const MD_ATTRIBUTE& attr) {
 
 class Renderer {
  public:
-  Renderer(std::string markdown, const Theme& theme, WrapMode mode)
-      : source_(std::move(markdown)),
+  Renderer(const std::string& markdown, const Theme& theme, WrapMode mode)
+      : source_(markdown),
         theme_(theme),
         wrap_(mode == WrapMode::Wrap) {}
 
-  explicit Renderer(std::string markdown, const Config& config)
-      : Renderer(std::move(markdown), config.theme, config.horizontal_wrap) {}
+  explicit Renderer(const std::string& markdown, const Config& config)
+      : Renderer(markdown, config.theme, config.horizontal_wrap) {}
 
   Element Run() {
     MD_PARSER parser = {};
@@ -1786,7 +1786,7 @@ class Renderer {
     }
   }
 
-  std::string source_;
+  const std::string& source_;
   const Theme& theme_;
   const bool wrap_;
   std::vector<Frame> frames_;

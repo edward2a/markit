@@ -675,6 +675,24 @@ TEST(Anchor, LocateHeadingRowsDuplicatesMapByRank) {
   EXPECT_EQ(CurrentFor(map, map[1].first), 1);
 }
 
+// Missing and empty heading fingerprints do not consume a document row or
+// shift the occurrence rank of later duplicate headings.
+TEST(Anchor, LocateHeadingRowsSkipsMissingAndEmptyHeadings) {
+  const char* doc = "# Same\n\none\n\n# Same\n\ntwo\n";
+  auto tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const auto actual = markit::ExtractHeadings(doc);
+  ASSERT_EQ(actual.size(), 2u);
+  const std::vector<markit::Heading> headings = {
+      {1, ""}, {1, "missing"}, actual[0], actual[0]};
+
+  const auto map =
+      markit::LocateHeadingRows(tree, headings, kWidth, kHeight, true);
+  ASSERT_EQ(map.size(), 2u);
+  EXPECT_EQ(map[0].second, 2);
+  EXPECT_EQ(map[1].second, 3);
+  EXPECT_LT(map[0].first, map[1].first);
+}
+
 // Wrap-mode trees locate too (boundaries are width-dependent there).
 TEST(Anchor, LocateHeadingRowsWorksInWrapMode) {
   const char* doc = "# Alpha\n\nbody one\n\n## Beta\n\nbody two\n";
