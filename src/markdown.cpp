@@ -8,6 +8,7 @@
 #include <algorithm>  // for max
 #include <cctype>     // for tolower/isspace/isalnum (HTML tag parsing)
 #include <string>     // for string, to_string
+#include <string_view>  // for string_view
 #include <utility>    // for move
 #include <vector>     // for vector
 
@@ -212,18 +213,43 @@ class Renderer {
     return result;
   }
 
-  std::string ComposedStyleKey() const {
-    std::string key;
-    for (const auto& k : span_keys_) {
-      if (!key.empty()) {
-        key += '\x1f';
+  const std::string& ComposedStyleKey() const {
+    if (!style_key_cache_valid_) {
+      style_key_cache_.clear();
+      for (const auto& k : span_keys_) {
+        if (!style_key_cache_.empty()) {
+          style_key_cache_ += '\x1f';
+        }
+        style_key_cache_ += k;
       }
-      key += k;
+      style_key_cache_valid_ = true;
     }
-    return key;
+    return style_key_cache_;
   }
 
-  void EmitInline(const std::string& text) {
+  void PushSpan(Decorator style, std::string key) {
+    span_decorators_.push_back(std::move(style));
+    span_keys_.push_back(std::move(key));
+    style_key_cache_valid_ = false;
+  }
+
+  void PopSpan() {
+    if (!span_decorators_.empty()) {
+      span_decorators_.pop_back();
+    }
+    if (!span_keys_.empty()) {
+      span_keys_.pop_back();
+    }
+    style_key_cache_valid_ = false;
+  }
+
+  void ResizeSpans(std::size_t size) {
+    span_decorators_.resize(size);
+    span_keys_.resize(size);
+    style_key_cache_valid_ = false;
+  }
+
+  void EmitInline(std::string_view text) {
     if (text.empty()) {
       return;
     }
@@ -234,7 +260,8 @@ class Renderer {
         top.kind != Kind::Para && top.kind != Kind::Cell) {
       return;
     }
-    top.inline_.push_back(Fragment{text, ComposedStyle(), ComposedStyleKey()});
+    top.inline_.push_back(
+        Fragment{std::string(text), ComposedStyle(), ComposedStyleKey()});
   }
 
   // Split a row's fragments into word elements for wrap mode. A "word" is a
@@ -316,7 +343,6 @@ class Renderer {
           while (j < n && !is_space(frag.text[j])) {
             ++j;
           }
-          std::string word = frag.text.substr(i, j - i);
           if (!pending.empty()) {
             // Same-style run: the space belongs to the styled text (scroll
             // mode renders it as one continuous element), so keep the style.
@@ -328,7 +354,9 @@ class Renderer {
                            internal ? frag.style_key : std::string()});
             pending.clear();
           }
-          cur.push_back({std::move(word), frag.style, frag.style_key});
+          pending.append(frag.text, i, j - i);
+          cur.push_back({std::move(pending), frag.style, frag.style_key});
+          pending.clear();
           i = j;
         }
       }
@@ -400,7 +428,8 @@ class Renderer {
   // lines, so pure-verbatim frames coalesce into pending_html_ and attach
   // as a single box instead of one box per block.
 
-  static std::string ToLower(std::string s) {
+  static std::string ToLower(std::string_view input) {
+    std::string s(input);
     for (char& c : s) {
       c = static_cast<char>(
           std::tolower(static_cast<unsigned char>(c)));
@@ -412,7 +441,7 @@ class Renderer {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
   }
 
-  static bool IsAllSpace(const std::string& s) {
+  static bool IsAllSpace(std::string_view s) {
     for (char c : s) {
       if (!IsHtmlSpace(c)) {
         return false;
@@ -426,7 +455,7 @@ class Renderer {
   // newlines must never reach a text() element: hflow treats "\n" as a row
   // break, stranding styled (underlined/hyperlink) spaces on the next visual
   // row as a phantom underlined line carrying the link URL.
-  static std::string CollapseHtmlSpace(const std::string& s) {
+  static std::string CollapseHtmlSpace(std::string_view s) {
     std::string out;
     out.reserve(s.size());
     bool in_space = false;
@@ -564,7 +593,7 @@ class Renderer {
     }
   }
 
-  void HtmlInlineText(const std::string& text) {
+  void HtmlInlineText(std::string_view text) {
     if (text.empty()) {
       return;
     }
@@ -624,30 +653,28 @@ class Renderer {
   }
 
   // Verbatim fallback: styled inline in running text, boxed at block level.
-  void HtmlVerbatim(const std::string& text) {
+  void HtmlVerbatim(std::string_view text) {
     if (text.empty()) {
       return;
     }
     Frame& top = Top();
     if (IsInlineCapable(top.kind)) {
-      span_decorators_.push_back(InlineCodeStyle());
-      span_keys_.push_back("code");
+      PushSpan(InlineCodeStyle(), "code");
       EmitInline(text);
-      span_decorators_.pop_back();
-      span_keys_.pop_back();
+      PopSpan();
       return;
     }
     if (top.kind == Kind::Html) {
-      top.text += text;
+      top.text.append(text.data(), text.size());
       return;
     }
-    Attach(CodeElement(text, wrap_), true);
+    Attach(CodeElement(std::string(text), wrap_), true);
   }
 
   // Parse `name="value"` / `name='value'` / `name=value` / bare names from a
   // tag body (everything between `<name` and `>`). Names are lowercased.
   static std::vector<std::pair<std::string, std::string>> ParseHtmlAttrs(
-      const std::string& body) {
+      std::string_view body) {
     std::vector<std::pair<std::string, std::string>> attrs;
     size_t i = 0;
     const size_t n = body.size();
@@ -701,9 +728,9 @@ class Renderer {
     return attrs;
   }
 
-  static std::string HtmlAttr(
+  static std::string_view HtmlAttr(
       const std::vector<std::pair<std::string, std::string>>& attrs,
-      const std::string& name) {
+      std::string_view name) {
     for (const auto& [key, value] : attrs) {
       if (key == name) {
         return value;
@@ -716,7 +743,7 @@ class Renderer {
   // `open="open"` all count (e.g. <details open> starts expanded).
   static bool HasHtmlAttr(
       const std::vector<std::pair<std::string, std::string>>& attrs,
-      const std::string& name) {
+      std::string_view name) {
     for (const auto& [key, value] : attrs) {
       if (key == name) {
         return true;
@@ -733,20 +760,19 @@ class Renderer {
 
   // Push an inline style for an opening tag (reusing the markdown span
   // machinery, so wrap-mode style continuity applies to HTML content too).
-  void HtmlOpenSpan(Decorator style, const std::string& key) {
+  void HtmlOpenSpan(Decorator style, std::string_view key) {
     EnsureHtmlPara();
     if (!IsInlineCapable(Top().kind)) {
       return;
     }
-    span_decorators_.push_back(std::move(style));
-    span_keys_.push_back(key);
+    PushSpan(std::move(style), std::string(key));
     ++html_open_count_;
   }
 
   // Pop for a closing tag. Strict: only the matching entry goes, so a stray
   // close in a markdown paragraph can never pop a markdown span (or vice
   // versa); unclosed entries die with the enclosing block anyway.
-  void HtmlCloseSpan(const std::string& key, bool prefix = false) {
+  void HtmlCloseSpan(std::string_view key, bool prefix = false) {
     if (html_open_count_ == 0 || span_keys_.empty() ||
         span_decorators_.empty()) {
       return;
@@ -759,12 +785,11 @@ class Renderer {
     if (!match) {
       return;
     }
-    span_decorators_.pop_back();
-    span_keys_.pop_back();
+    PopSpan();
     --html_open_count_;
   }
 
-  void HandleHtmlTag(const std::string& inner, const std::string& raw) {
+  void HandleHtmlTag(std::string_view inner, std::string_view raw) {
     // Comments, doctypes, processing instructions: always verbatim.
     if (inner.size() >= 3 && inner[0] == '!' && inner[1] == '-' &&
         inner[2] == '-') {
@@ -855,7 +880,7 @@ class Renderer {
         link_ws_key_.clear();
         HtmlCloseSpan("a:", true);
       } else {
-        const std::string href = HtmlAttr(attrs, "href");
+        const std::string href(HtmlAttr(attrs, "href"));
         HtmlOpenSpan(href.empty() ? Decorator(ftxui::underlined)
                                   : LinkStyle(href),
                      "a:" + href);
@@ -871,12 +896,10 @@ class Renderer {
         if (!IsInlineCapable(Top().kind)) {
           return;
         }
-        const std::string alt = HtmlAttr(attrs, "alt");
-        span_decorators_.push_back(ftxui::dim);
-        span_keys_.push_back("img");
+        const std::string_view alt = HtmlAttr(attrs, "alt");
+        PushSpan(ftxui::dim, "img");
         EmitInline(alt.empty() ? "[img]" : alt);
-        span_decorators_.pop_back();
-        span_keys_.pop_back();
+        PopSpan();
       }
       return;
     }
@@ -910,11 +933,9 @@ class Renderer {
         if (IsInlineCapable(Top().kind)) {
           // Invalid nesting (<pre> inside running text): fall back to
           // styled inline rather than corrupting the stack.
-          span_decorators_.push_back(InlineCodeStyle());
-          span_keys_.push_back("code");
+          PushSpan(InlineCodeStyle(), "code");
           EmitInline(raw_buf_);
-          span_decorators_.pop_back();
-          span_keys_.pop_back();
+          PopSpan();
         } else if (Top().kind == Kind::Html) {
           Top().text += raw_buf_;
         } else {
@@ -1085,7 +1106,7 @@ class Renderer {
   // Find `</name>` (case-insensitive, allowing whitespace) at or after
   // `from`; returns the '<' index or npos.
   static size_t FindHtmlCloseTag(const std::string& buf, size_t from,
-                                 const std::string& name) {
+                                 std::string_view name) {
     for (size_t lt = buf.find('<', from); lt != std::string::npos;
          lt = buf.find('<', lt + 1)) {
       size_t k = lt + 1;
@@ -1103,7 +1124,7 @@ class Renderer {
       while (m < buf.size() && IsTagChar(buf[m])) {
         ++m;
       }
-      if (ToLower(buf.substr(k, m - k)) != name) {
+      if (ToLower(std::string_view(buf).substr(k, m - k)) != name) {
         continue;
       }
       if (m >= buf.size() || buf[m] == '>' || IsHtmlSpace(buf[m]) ||
@@ -1116,54 +1137,55 @@ class Renderer {
 
   // Interpret one MD_TEXT_HTML chunk. Tags may arrive split across md4c
   // callbacks, so an unterminated tag stays buffered in html_chunk_.
-  void HtmlText(const std::string& s) {
-    html_chunk_ += s;
+  void HtmlText(std::string_view s) {
+    html_chunk_.append(s.data(), s.size());
     size_t pos = 0;
     while (pos < html_chunk_.size()) {
       if (!raw_tag_.empty()) {
         const size_t lt = FindHtmlCloseTag(html_chunk_, pos, raw_tag_);
         if (lt == std::string::npos) {
-          raw_buf_ += html_chunk_.substr(pos);
+          raw_buf_.append(html_chunk_.data() + pos, html_chunk_.size() - pos);
           html_chunk_.clear();
           return;
         }
-        raw_buf_ += html_chunk_.substr(pos, lt - pos);
+        raw_buf_.append(html_chunk_.data() + pos, lt - pos);
         const size_t gt = html_chunk_.find('>', lt + 1);
-        // Keep the '/' prefix: HandleHtmlTag detects closes from inner[0].
-        const std::string inner =
-            "/" + html_chunk_.substr(lt + 2, gt - lt - 2);
-        const std::string raw = html_chunk_.substr(lt, gt - lt + 1);
-        html_chunk_ = html_chunk_.substr(gt + 1);
+        const std::string_view chunk(html_chunk_);
+        const std::string_view inner = chunk.substr(lt + 1, gt - lt - 1);
+        const std::string_view raw = chunk.substr(lt, gt - lt + 1);
         pos = 0;
         HandleHtmlTag(inner, raw);
+        html_chunk_.erase(0, gt + 1);
         continue;
       }
       const size_t lt = html_chunk_.find('<', pos);
       if (lt == std::string::npos) {
-        HtmlInlineText(html_chunk_.substr(pos));
+        HtmlInlineText(std::string_view(html_chunk_).substr(pos));
         html_chunk_.clear();
         return;
       }
       if (lt > pos) {
-        HtmlInlineText(html_chunk_.substr(pos, lt - pos));
+        HtmlInlineText(std::string_view(html_chunk_).substr(pos, lt - pos));
       }
       if (html_chunk_.compare(lt, 4, "<!--") == 0) {
         const size_t end = html_chunk_.find("-->", lt + 4);
         if (end == std::string::npos) {
-          html_chunk_ = html_chunk_.substr(lt);
+          html_chunk_.erase(0, lt);
           return;
         }
-        HtmlVerbatim(html_chunk_.substr(lt, end + 3 - lt));
+        HtmlVerbatim(
+            std::string_view(html_chunk_).substr(lt, end + 3 - lt));
         pos = end + 3;
         continue;
       }
       const size_t gt = html_chunk_.find('>', lt + 1);
       if (gt == std::string::npos) {
-        html_chunk_ = html_chunk_.substr(lt);  // partial tag; await more.
+        html_chunk_.erase(0, lt);  // partial tag; await more.
         return;
       }
-      HandleHtmlTag(html_chunk_.substr(lt + 1, gt - lt - 1),
-                    html_chunk_.substr(lt, gt - lt + 1));
+      const std::string_view chunk(html_chunk_);
+      HandleHtmlTag(chunk.substr(lt + 1, gt - lt - 1),
+                    chunk.substr(lt, gt - lt + 1));
       pos = gt + 1;
     }
     html_chunk_.clear();
@@ -1183,17 +1205,14 @@ class Renderer {
       return;
     }
     if (!html_chunk_.empty()) {
-      span_decorators_.push_back(InlineCodeStyle());
-      span_keys_.push_back("code");
+      PushSpan(InlineCodeStyle(), "code");
       EmitInline(html_chunk_);
-      span_decorators_.pop_back();
-      span_keys_.pop_back();
+      PopSpan();
       html_chunk_.clear();
     }
     while (html_open_count_ > 0 && !span_decorators_.empty() &&
            !span_keys_.empty()) {
-      span_decorators_.pop_back();
-      span_keys_.pop_back();
+      PopSpan();
       --html_open_count_;
     }
     link_ws_key_.clear();
@@ -1420,8 +1439,7 @@ class Renderer {
             raw_buf_.clear();
           }
           if (span_decorators_.size() > span_depth_) {
-            span_decorators_.resize(span_depth_);
-            span_keys_.resize(span_depth_);
+            ResizeSpans(span_depth_);
           }
           html_open_count_ = 0;
           html_align_ = 0;
@@ -1525,35 +1543,28 @@ class Renderer {
   int EnterSpanImpl(MD_SPANTYPE type, void* detail) {
     switch (type) {
       case MD_SPAN_EM:
-        span_decorators_.push_back(ftxui::italic);
-        span_keys_.push_back("em");
+        PushSpan(ftxui::italic, "em");
         break;
       case MD_SPAN_STRONG:
-        span_decorators_.push_back(ftxui::bold);
-        span_keys_.push_back("strong");
+        PushSpan(ftxui::bold, "strong");
         break;
       case MD_SPAN_DEL:
-        span_decorators_.push_back(ftxui::strikethrough);
-        span_keys_.push_back("del");
+        PushSpan(ftxui::strikethrough, "del");
         break;
       case MD_SPAN_CODE:
-        span_decorators_.push_back(InlineCodeStyle());
-        span_keys_.push_back("code");
+        PushSpan(InlineCodeStyle(), "code");
         break;
       case MD_SPAN_A: {
         auto* a = static_cast<MD_SPAN_A_DETAIL*>(detail);
         const std::string href = Attr(a->href);
-        span_decorators_.push_back(LinkStyle(href));
-        span_keys_.push_back("a:" + href);
+        PushSpan(LinkStyle(href), "a:" + href);
         break;
       }
       case MD_SPAN_IMG:
-        span_decorators_.push_back(ftxui::dim);
-        span_keys_.push_back("img");
+        PushSpan(ftxui::dim, "img");
         break;
       case MD_SPAN_U:
-        span_decorators_.push_back(ftxui::underlined);
-        span_keys_.push_back("u");
+        PushSpan(ftxui::underlined, "u");
         break;
       default:
         break;
@@ -1570,12 +1581,7 @@ class Renderer {
       case MD_SPAN_A:
       case MD_SPAN_U:
       case MD_SPAN_IMG:
-        if (!span_decorators_.empty()) {
-          span_decorators_.pop_back();
-        }
-        if (!span_keys_.empty()) {
-          span_keys_.pop_back();
-        }
+        PopSpan();
         break;
       default:
         break;
@@ -1584,7 +1590,7 @@ class Renderer {
   }
 
   int TextImpl(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size) {
-    std::string s(reinterpret_cast<const char*>(text), size);
+    const std::string_view s(reinterpret_cast<const char*>(text), size);
     switch (type) {
       case MD_TEXT_NORMAL:
       case MD_TEXT_ENTITY:
@@ -1619,7 +1625,7 @@ class Renderer {
       case MD_TEXT_CODE: {
         Frame& top = Top();
         if (top.kind == Kind::Code) {
-          top.text += s;
+          top.text.append(s.data(), s.size());
         } else if (in_html_) {
           HtmlText(s);
         } else {
@@ -1652,17 +1658,15 @@ class Renderer {
 
   Element CodeElement(const std::string& code, bool wrap) {
     std::vector<std::string> lines;
-    std::string cur;
-    for (char c : code) {
-      if (c == '\n') {
-        lines.push_back(cur);
-        cur.clear();
-      } else {
-        cur += c;
+    size_t line_start = 0;
+    for (size_t i = 0; i < code.size(); ++i) {
+      if (code[i] == '\n') {
+        lines.emplace_back(code.data() + line_start, i - line_start);
+        line_start = i + 1;
       }
     }
-    if (!cur.empty() || code.empty()) {
-      lines.push_back(cur);
+    if (line_start < code.size() || code.empty()) {
+      lines.emplace_back(code.data() + line_start, code.size() - line_start);
     }
 
     auto token_text = [this](std::string s) {
@@ -1691,14 +1695,15 @@ class Renderer {
           while (j < n && (l[j] == ' ' || l[j] == '\t')) {
             ++j;
           }
-          pending += l.substr(i, j - i);
+          pending.append(l, i, j - i);
           i = j;
         } else {
           size_t j = i;
           while (j < n && l[j] != ' ' && l[j] != '\t') {
             ++j;
           }
-          toks.push_back(token_text(pending + l.substr(i, j - i)));
+          pending.append(l, i, j - i);
+          toks.push_back(token_text(std::move(pending)));
           pending.clear();
           i = j;
         }
@@ -1794,6 +1799,8 @@ class Renderer {
   std::vector<Frame> frames_;
   std::vector<Decorator> span_decorators_;
   std::vector<std::string> span_keys_;
+  mutable std::string style_key_cache_;
+  mutable bool style_key_cache_valid_ = false;
   // HTML interpretation state (see the HTML rendering helpers above).
   bool in_html_ = false;
   // Inside a markdown paragraph only inline tags interpret; block-level

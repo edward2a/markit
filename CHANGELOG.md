@@ -23,6 +23,7 @@ Versions are ordered newest-first: new change lines append inside the top sectio
 - 2026-09-23T00:56:11Z - mod - Move search matcher construction and full-row scans into the generation-guarded worker with immutable row handoff and stale query/layout/document rejection; consolidate heading matching with lower-allocation fingerprints and binary section lookup, avoid a parser-source copy, add toggle/query/heading benchmarks and worker churn coverage, and verify tests, PTY flows, Release/MinSizeRel builds, and Helgrind
 - 2026-09-23T01:04:59Z - mod - Split Theme, WrapMode, and KeyBindings into focused public headers, make Markdown's narrow render API self-contained, keep md4c/yaml-cpp private to markit_core, add explicit YAML linkage for tests, and compile each public header independently in development builds
 - 2026-09-23T01:12:49Z - mod - Precompute normalized heading fingerprints once per immutable document revision and reuse them for navigation-map refreshes and wrap/scroll anchor remapping; retain the existing convenience APIs and verify the cached path with anchor tests and benchmarks
+- 2026-09-23T01:26:17Z - mod - Reduce Markdown renderer allocation churn by keeping md4c callback text as string views until durable fragments are created, slicing HTML in place, constructing code lines directly, using append-based wrapping, and caching composed style keys; the full Markdown suite and performance benchmark remain green
 
 ## 0.0.7 - 2026-09-21T22:33:33Z
 
