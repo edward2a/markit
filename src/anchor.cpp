@@ -4,13 +4,15 @@
 #include <algorithm>  // for clamp, count_if, max
 #include <cmath>      // for llround
 #include <cstdlib>    // for abs
-#include <limits>     // for numeric_limits
+#include <memory>     // for make_shared
 #include <optional>  // for optional
 #include <string>     // for string, to_string
 #include <utility>    // for pair
 #include <vector>     // for vector
 
+#include <ftxui/dom/elements.hpp>       // for focusPosition, operator|, yframe
 #include <ftxui/dom/node.hpp>           // for Render
+#include <ftxui/screen/box.hpp>         // for Box
 #include <ftxui/screen/screen.hpp>      // for Screen, Cell
 #include <ftxui/screen/terminal.hpp>    // for Dimension
 #include <ftxui/screen/color.hpp>       // for Color
@@ -21,6 +23,10 @@ namespace {
 
 // Words carried from the anchor row into the fingerprint.
 constexpr int kAnchorWords = 10;
+constexpr int kMaxRenderRows = 65536;
+constexpr int kRenderChunkCellBudget = 1 << 20;
+constexpr int kMinRenderChunkRows = 64;
+constexpr int kMaxRenderChunkRows = 512;
 
 struct Row {
   std::string text;  // trimmed, internal whitespace collapsed to one space.
@@ -37,6 +43,7 @@ bool IsBlankCell(const ftxui::Cell& cell) {
 // Collapse leading/trailing whitespace and internal runs to single spaces.
 std::string Normalize(const std::string& s) {
   std::string out;
+  out.reserve(s.size());
   bool pending_space = false;
   bool started = false;
   for (char c : s) {
@@ -57,40 +64,47 @@ std::string Normalize(const std::string& s) {
   return out;
 }
 
-std::vector<std::string> SplitWords(const std::string& s) {
-  std::vector<std::string> words;
-  std::string cur;
+int CountWords(const std::string& s, int limit) {
+  int count = 0;
+  bool in_word = false;
   for (char c : s) {
     if (c == ' ') {
-      if (!cur.empty()) {
-        words.push_back(cur);
-        cur.clear();
+      in_word = false;
+    } else if (!in_word) {
+      in_word = true;
+      if (++count == limit) {
+        return count;
       }
-    } else {
-      cur += c;
     }
   }
-  if (!cur.empty()) {
-    words.push_back(cur);
-  }
-  return words;
+  return count;
 }
 
-std::string JoinWords(const std::vector<std::string>& words, int count) {
+std::string Fingerprint(const std::string& normalized) {
   std::string out;
-  const int n = std::min<int>(count, words.size());
-  for (int i = 0; i < n; ++i) {
-    if (i > 0) {
+  out.reserve(normalized.size());
+  int words = 0;
+  std::size_t start = 0;
+  while (start < normalized.size() && words < kAnchorWords) {
+    while (start < normalized.size() && normalized[start] == ' ') {
+      ++start;
+    }
+    if (start == normalized.size()) {
+      break;
+    }
+    const std::size_t end = normalized.find(' ', start);
+    if (words > 0) {
       out += ' ';
     }
-    out += words[i];
+    out.append(normalized, start,
+               end == std::string::npos ? std::string::npos : end - start);
+    ++words;
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
   }
   return out;
-}
-
-// First up-to-10 words; short rows contribute their whole trimmed text.
-std::string Fingerprint(const std::string& normalized) {
-  return JoinWords(SplitWords(normalized), kAnchorWords);
 }
 
 bool StartsWithWord(const std::string& text, const std::string& fp) {
@@ -139,16 +153,88 @@ int NaturalWidth(int min_x, int viewport_width) {
   return std::clamp(std::max(1, min_x), viewport_width, 8192);
 }
 
-// Seed cap for the offscreen render: the unwrapped requirement scaled by the
-// reflow ratio (narrow widths multiply rows), plus viewport slack. The old
-// seed (exactly min_y) guaranteed a wasted grow-and-re-render pass whenever
-// content filled the screen, because a full screen is indistinguishable from
-// a truncated one; the slack makes the common case a single pass while the
-// growth loop below stays as the correctness backstop.
+// Estimate the returned row count for vector reservation. Screen allocation is
+// handled separately by bounded vertical windows, so this estimate no longer
+// controls a full-height offscreen surface.
 int SeedCap(int min_y, int viewport_height, int ratio) {
   const long long est =
       static_cast<long long>(min_y) * ratio + viewport_height + 1;
   return std::clamp<long long>(est, 256, 65536);
+}
+
+int RenderChunkRows(int width) {
+  const int by_budget = kRenderChunkCellBudget / std::max(1, width);
+  return std::clamp(by_budget, kMinRenderChunkRows, kMaxRenderChunkRows);
+}
+
+// FTXUI's reflect decorator clips the captured box to the screen stencil while
+// rendering. This small wrapper records the translated child box before that
+// clipping, which lets the bounded renderer map each window back to a global
+// row range.
+class BoxCapture final : public ftxui::Node {
+ public:
+  BoxCapture(ftxui::Element child, ftxui::Box* box)
+      : ftxui::Node(ftxui::Elements{std::move(child)}), box_(box) {}
+
+  void ComputeRequirement() final {
+    ftxui::Node::ComputeRequirement();
+    requirement_ = children_[0]->requirement();
+  }
+
+  void SetBox(ftxui::Box box) final {
+    *box_ = box;
+    ftxui::Node::SetBox(box);
+    children_[0]->SetBox(box);
+  }
+
+  void Render(ftxui::Screen& screen) final { children_[0]->Render(screen); }
+
+ private:
+  ftxui::Box* box_;
+};
+
+// Render a tree a bounded window at a time. The frame centers a requested
+// global row in the small screen, then BoxCapture exposes the actual translated
+// start. When the request reaches the end of the document, the frame clamps to
+// its last window; overlapping rows are skipped by the caller.
+template <typename Callback>
+void ForEachRenderChunk(const ftxui::Element& tree, int width,
+                        Callback&& callback) {
+  if (!tree) {
+    return;
+  }
+
+  const int chunk_rows = RenderChunkRows(width);
+  ftxui::Screen screen =
+      ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                            ftxui::Dimension::Fixed(chunk_rows));
+  for (int requested_start = 0;; requested_start += chunk_rows) {
+    ftxui::Box content_box;
+    ftxui::Element captured =
+        std::make_shared<BoxCapture>(tree, &content_box);
+    ftxui::Element window =
+        std::move(captured) |
+        ftxui::focusPosition(0, requested_start + (chunk_rows - 1) / 2) |
+        ftxui::yframe;
+
+    screen.Clear();
+    ftxui::Render(screen, window);
+
+    const int actual_start = std::max(0, -content_box.y_min);
+    const int first_row = std::max(requested_start, actual_start);
+    const int last_row = std::min(kMaxRenderRows,
+                                  actual_start + chunk_rows);
+    if (first_row < last_row) {
+      callback(screen, actual_start, first_row, last_row);
+    }
+
+    // A clamped frame means this request reached the final content window.
+    // The hard limit preserves the previous API's maximum extraction size.
+    if (actual_start < requested_start ||
+        requested_start + chunk_rows >= kMaxRenderRows) {
+      break;
+    }
+  }
 }
 
 // Render the tree offscreen at `width`, returning one Row per content row
@@ -160,89 +246,106 @@ int SeedCap(int min_y, int viewport_height, int ratio) {
 std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
                             int min_x, int viewport_height, bool may_reflow) {
   const int ratio = may_reflow ? std::max(1, (min_x + width - 1) / width) : 1;
-  int cap = SeedCap(min_y, viewport_height, ratio);
+  const int reserve_rows = SeedCap(min_y, viewport_height, ratio);
+  std::vector<Row> rows;
+  rows.reserve(static_cast<size_t>(reserve_rows));
   int last = -1;
-  ftxui::Screen screen =
-      ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
-                            ftxui::Dimension::Fixed(cap));
-  for (;;) {
-    ftxui::Render(screen, element);
-    last = -1;
-    for (int row = 0; row < cap; ++row) {
+  ForEachRenderChunk(element, width, [&](const ftxui::Screen& screen,
+                                         int actual_start, int first_row,
+                                         int last_row) {
+    for (int global_row = first_row; global_row < last_row; ++global_row) {
+      const int row = global_row - actual_start;
+      std::string raw;
+      raw.reserve(static_cast<size_t>(width));
+      bool bold = false;
+      bool seen_text = false;
+      bool edge_mark = false;
+      bool non_blank = false;
       for (int col = 0; col < width; ++col) {
-        if (!IsBlankCell(screen.CellAt(col, row))) {
-          last = row;
-          break;
+        const ftxui::Cell& cell = screen.CellAt(col, row);
+        const std::string& ch = cell.character;
+        raw += ch;
+        non_blank = non_blank || !IsBlankCell(cell);
+        if (!seen_text && ch != " " && !ch.empty()) {
+          seen_text = true;
+          bold = cell.bold;
+        }
+        if (col == width - 1) {
+          edge_mark = (ch != " " && !ch.empty()) ||
+                      cell.background_color != ftxui::Color::Default;
         }
       }
-    }
-    if (last < cap - 1 || cap >= 65536) {
-      break;
-    }
-    cap *= 4;
-    screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
-                                   ftxui::Dimension::Fixed(cap));
-  }
-  std::vector<Row> rows;
-  for (int row = 0; row <= last; ++row) {
-    std::string raw;
-    raw.reserve(static_cast<size_t>(width));
-    bool bold = false;
-    bool seen_text = false;
-    bool edge_mark = false;
-    for (int col = 0; col < width; ++col) {
-      const ftxui::Cell& cell = screen.CellAt(col, row);
-      const std::string& ch = cell.character;
-      raw += ch;
-      if (!seen_text && ch != " " && !ch.empty()) {
-        seen_text = true;
-        bold = cell.bold;
+      if (static_cast<int>(rows.size()) < global_row) {
+        rows.resize(static_cast<size_t>(global_row));
       }
-      if (col == width - 1) {
-        edge_mark = (ch != " " && !ch.empty()) ||
-                    cell.background_color != ftxui::Color::Default;
+      if (static_cast<int>(rows.size()) == global_row) {
+        rows.push_back(Row{Normalize(raw), bold, seen_text && edge_mark});
+      } else {
+        rows[static_cast<size_t>(global_row)] =
+            Row{Normalize(raw), bold, seen_text && edge_mark};
+      }
+      if (non_blank) {
+        last = global_row;
       }
     }
-    rows.push_back(Row{Normalize(raw), bold, seen_text && edge_mark});
+  });
+  if (last + 1 < static_cast<int>(rows.size())) {
+    rows.resize(static_cast<size_t>(last + 1));
   }
   return rows;
 }
 
-// Locate heading rows in order: row contains the heading's fingerprint and is
-// bold. Each search starts after the previous hit, so duplicate titles map by
-// occurrence rank. Misses are skipped without consuming position.
-std::vector<int> FindHeadingRows(const std::vector<Row>& rows,
-                                 const std::vector<Heading>& headings) {
-  std::vector<int> found;
+HeadingFingerprints BuildHeadingFingerprintsInternal(
+    const std::vector<Heading>& headings) {
+  HeadingFingerprints fingerprints;
+  fingerprints.reserve(headings.size());
+  for (const Heading& heading : headings) {
+    fingerprints.push_back(Fingerprint(Normalize(heading.text)));
+  }
+  return fingerprints;
+}
+
+// Match heading fingerprints in order. Each search starts after the previous
+// hit, so duplicate titles map by occurrence rank. Misses are skipped without
+// consuming position. Both toggle anchoring and nav mapping use this exact
+// implementation to keep their section boundaries identical.
+template <typename Callback>
+void MatchHeadingRows(const std::vector<Row>& rows,
+                      const std::vector<std::string>& fingerprints,
+                      Callback&& callback) {
   std::size_t pos = 0;
-  for (const Heading& h : headings) {
-    const std::string fp = Fingerprint(Normalize(h.text));
+  for (std::size_t i = 0; i < fingerprints.size(); ++i) {
+    const std::string& fp = fingerprints[i];
     if (fp.empty()) {
       continue;
     }
     for (std::size_t r = pos; r < rows.size(); ++r) {
       if (rows[r].bold && ContainsWordSeq(rows[r].text, fp)) {
-        found.push_back(static_cast<int>(r));
+        callback(r, i);
         pos = r + 1;
         break;
       }
     }
   }
+}
+
+std::vector<int> FindHeadingRows(
+    const std::vector<Row>& rows,
+    const std::vector<std::string>& fingerprints) {
+  std::vector<int> found;
+  MatchHeadingRows(rows, fingerprints,
+                   [&](std::size_t row, std::size_t /*heading*/) {
+                     found.push_back(static_cast<int>(row));
+                   });
   return found;
 }
 
 // Section id = number of heading boundaries at or above the row. The
 // preamble (before the first heading) is section 0 when headings exist.
 int SectionId(const std::vector<int>& boundaries, int row) {
-  int id = 0;
-  for (int b : boundaries) {
-    if (b <= row) {
-      ++id;
-    } else {
-      break;
-    }
-  }
-  return id;
+  return static_cast<int>(std::upper_bound(boundaries.begin(), boundaries.end(),
+                                            row) -
+                           boundaries.begin());
 }
 
 int Proportional(int old_selected, int old_max, int new_max) {
@@ -324,52 +427,51 @@ std::optional<int> HeadingAnchor(const std::vector<int>& old_bounds,
 
 }  // namespace
 
+HeadingFingerprints BuildHeadingFingerprints(
+    const std::vector<Heading>& headings) {
+  return BuildHeadingFingerprintsInternal(headings);
+}
+
 // Render the tree offscreen at `width` and return the raw cell text of every
 // row through the last non-blank one (same row identity as the anonymous
 // RenderRows above, but un-normalized: search matches what the user sees).
-// The seed comes from the caller's height hint; the growth loop is the
-// correctness backstop when the hint is short (same truncation check).
+// The height hint remains a reserve hint for the returned rows; bounded
+// windows remove the old full-height screen and no longer need a grow loop.
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
-                                        int height_hint) {
+                                         int height_hint) {
   width = std::clamp(width, 1, 8192);
-  int cap = std::clamp(height_hint, 1, 65536);
-  ftxui::Screen screen =
-      ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
-                            ftxui::Dimension::Fixed(cap));
-  // Grow while the render is full (the last visible row carries text). A
-  // blank last row is ambiguous: interior gaps (paragraph separators,
-  // heading spacing) can land exactly on the cap boundary with content
-  // below, so a roomy render only ends the loop when it reveals no more
-  // text than the previous one.
+  std::vector<std::string> rows;
+  rows.reserve(static_cast<size_t>(std::clamp(height_hint, 1,
+                                               kMaxRenderRows)));
   int last = -1;
-  int prev_last = std::numeric_limits<int>::max();
-  for (;;) {
-    ftxui::Render(screen, tree);
-    last = -1;
-    for (int row = 0; row < cap; ++row) {
+  ForEachRenderChunk(tree, width, [&](const ftxui::Screen& screen,
+                                     int actual_start, int first_row,
+                                     int last_row) {
+    for (int global_row = first_row; global_row < last_row; ++global_row) {
+      const int row = global_row - actual_start;
+      std::string raw;
+      raw.reserve(static_cast<size_t>(width));
+      bool non_blank = false;
       for (int col = 0; col < width; ++col) {
-        if (!IsBlankCell(screen.CellAt(col, row))) {
-          last = row;
-          break;
-        }
+        const ftxui::Cell& cell = screen.CellAt(col, row);
+        raw += cell.character;
+        non_blank = non_blank || !IsBlankCell(cell);
+      }
+      if (static_cast<int>(rows.size()) < global_row) {
+        rows.resize(static_cast<size_t>(global_row));
+      }
+      if (static_cast<int>(rows.size()) == global_row) {
+        rows.push_back(std::move(raw));
+      } else {
+        rows[static_cast<size_t>(global_row)] = std::move(raw);
+      }
+      if (non_blank) {
+        last = global_row;
       }
     }
-    if ((last < cap - 1 && last <= prev_last) || cap >= 65536) {
-      break;
-    }
-    prev_last = last;
-    cap = std::min(65536, cap * 4);
-    screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
-                                    ftxui::Dimension::Fixed(cap));
-  }
-  std::vector<std::string> rows;
-  for (int row = 0; row <= last; ++row) {
-    std::string raw;
-    raw.reserve(static_cast<size_t>(width));
-    for (int col = 0; col < width; ++col) {
-      raw += screen.CellAt(col, row).character;
-    }
-    rows.push_back(raw);
+  });
+  if (last + 1 < static_cast<int>(rows.size())) {
+    rows.resize(static_cast<size_t>(last + 1));
   }
   return rows;
 }
@@ -388,9 +490,10 @@ int SearchExtractWidth(const ftxui::Element& tree, int viewport_width,
 
 int MapTogglePosition(const ftxui::Element& old_tree,
                       const ftxui::Element& new_tree,
-                      const std::vector<Heading>& headings, int old_selected,
-                      int viewport_width, int viewport_height,
-                      bool old_is_scroll, int* new_height_out) {
+                      int old_selected, int viewport_width, int viewport_height,
+                      bool old_is_scroll,
+                      const HeadingFingerprints& heading_fingerprints,
+                      int* new_height_out) {
   if (!old_tree || !new_tree || viewport_width < 1 || viewport_height < 1) {
     return 0;
   }
@@ -435,10 +538,12 @@ int MapTogglePosition(const ftxui::Element& old_tree,
   // the exact wide rematch below.
   const bool fp_truncated =
       old_narrow[idx].clipped &&
-      SplitWords(old_narrow[idx].text).size() < kAnchorWords;
+      CountWords(old_narrow[idx].text, kAnchorWords) < kAnchorWords;
 
-  std::vector<int> old_bounds = FindHeadingRows(old_narrow, headings);
-  std::vector<int> new_bounds = FindHeadingRows(new_narrow, headings);
+  std::vector<int> old_bounds =
+      FindHeadingRows(old_narrow, heading_fingerprints);
+  std::vector<int> new_bounds =
+      FindHeadingRows(new_narrow, heading_fingerprints);
 
   // (delta is 0 here: heading rows are never blank.)
   if (auto hit = HeadingAnchor(old_bounds, new_bounds, idx, delta,
@@ -471,7 +576,7 @@ int MapTogglePosition(const ftxui::Element& old_tree,
       // Row structure changed with width: fall back to proportional.
       return std::clamp(est + delta, 0, new_max);
     }
-    old_bounds = FindHeadingRows(*wide_old, headings);
+    old_bounds = FindHeadingRows(*wide_old, heading_fingerprints);
   } else {
     wide_new = RenderRows(new_tree, NaturalWidth(new_min_x, viewport_width),
                           new_min_y, new_min_x, viewport_height,
@@ -479,7 +584,7 @@ int MapTogglePosition(const ftxui::Element& old_tree,
     if (wide_new->size() != new_narrow.size()) {
       return std::clamp(est + delta, 0, new_max);
     }
-    new_bounds = FindHeadingRows(*wide_new, headings);
+    new_bounds = FindHeadingRows(*wide_new, heading_fingerprints);
   }
   const std::vector<Row>& old_rows = wide_old ? *wide_old : old_narrow;
   const std::vector<Row>& new_rows = wide_new ? *wide_new : new_narrow;
@@ -496,9 +601,26 @@ int MapTogglePosition(const ftxui::Element& old_tree,
   return std::clamp(pos + delta, 0, new_max);
 }
 
+int MapTogglePosition(const ftxui::Element& old_tree,
+                      const ftxui::Element& new_tree,
+                      const std::vector<Heading>& headings, int old_selected,
+                      int viewport_width, int viewport_height,
+                      bool old_is_scroll, int* new_height_out) {
+  return MapTogglePosition(old_tree, new_tree, old_selected, viewport_width,
+                           viewport_height, old_is_scroll,
+                           BuildHeadingFingerprints(headings), new_height_out);
+}
+
 std::vector<std::pair<int, int>> LocateHeadingRows(
     const ftxui::Element& tree, const std::vector<Heading>& headings,
     int width, int viewport_height, bool is_scroll) {
+  return LocateHeadingRows(tree, width, viewport_height, is_scroll,
+                           BuildHeadingFingerprints(headings));
+}
+
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const ftxui::Element& tree, int width, int viewport_height, bool is_scroll,
+    const HeadingFingerprints& heading_fingerprints) {
   std::vector<std::pair<int, int>> located;
   if (!tree || width < 1 || viewport_height < 1) {
     return located;
@@ -512,23 +634,11 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
   if (rows.empty()) {
     return located;
   }
-  // Same ordered search as FindHeadingRows, but records the heading index
-  // (into `headings`, i.e. nav rows) so duplicates resolve by rank and
-  // empty-fingerprint headings are skipped without shifting later indices.
-  std::size_t pos = 0;
-  for (std::size_t i = 0; i < headings.size(); ++i) {
-    const std::string fp = Fingerprint(Normalize(headings[i].text));
-    if (fp.empty()) {
-      continue;
-    }
-    for (std::size_t r = pos; r < rows.size(); ++r) {
-      if (rows[r].bold && ContainsWordSeq(rows[r].text, fp)) {
-        located.emplace_back(static_cast<int>(r), static_cast<int>(i));
-        pos = r + 1;
-        break;
-      }
-    }
-  }
+  MatchHeadingRows(
+      rows, heading_fingerprints,
+      [&](std::size_t row, std::size_t heading) {
+        located.emplace_back(static_cast<int>(row), static_cast<int>(heading));
+      });
   return located;
 }
 

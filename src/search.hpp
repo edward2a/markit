@@ -3,7 +3,7 @@
 // The Matcher interface abstracts the regex engine (RE2 today) so unit tests
 // can substitute fakes and a future engine slots in without touching callers.
 // RE2 gives linear-time matching, which matters because the pattern is
-// recompiled and re-run on every keystroke of incremental search.
+// re-run across all extracted rows as incremental search changes.
 #ifndef MARKIT_SEARCH_HPP
 #define MARKIT_SEARCH_HPP
 

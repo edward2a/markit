@@ -8,6 +8,7 @@
 #include <ftxui/screen/screen.hpp>  // for Screen
 
 #include "markdown.hpp"
+#include "config.hpp"
 
 namespace {
 
@@ -72,6 +73,21 @@ bool AnyLineContains(const std::vector<std::string>& lines,
     }
   }
   return false;
+}
+
+TEST(Markdown, NarrowRenderSettingsMatchConfig) {
+  const std::string markdown = "# Heading\n\nbody with *emphasis*.\n";
+  markit::Config config;
+  config.horizontal_wrap = markit::WrapMode::Scroll;
+  config.theme.heading_h1 = ftxui::Color::Blue;
+
+  ftxui::Screen from_config(60, 20);
+  ftxui::Screen from_settings(60, 20);
+  ftxui::Render(from_config, markit::RenderMarkdown(markdown, config));
+  ftxui::Render(from_settings,
+                markit::RenderMarkdown(markdown, config.theme,
+                                       config.horizontal_wrap));
+  EXPECT_EQ(from_config.ToString(), from_settings.ToString());
 }
 
 // Approximate rendered cell width: UTF-8 continuation bytes (0x80..0xBF) do
