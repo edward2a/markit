@@ -19,6 +19,13 @@
 
 namespace markit {
 
+// Normalized heading prefixes computed once for an immutable document
+// revision. Reuse this value across heading-map refreshes and mode toggles.
+using HeadingFingerprints = std::vector<std::string>;
+
+HeadingFingerprints BuildHeadingFingerprints(
+    const std::vector<Heading>& headings);
+
 // Locate each heading's row in `tree` rendered at `width`: ordered
 // (row, heading-index) pairs, heading indices into `headings` (nav rows).
 // Same matching as the toggle anchor (bold row containing the heading's
@@ -29,6 +36,11 @@ namespace markit {
 std::vector<std::pair<int, int>> LocateHeadingRows(
     const ftxui::Element& tree, const std::vector<Heading>& headings,
     int width, int viewport_height, bool is_scroll);
+
+// Cached-fingerprint overload for callers that retain a document revision.
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const ftxui::Element& tree, int width, int viewport_height, bool is_scroll,
+    const HeadingFingerprints& fingerprints);
 
 // Render `tree` offscreen at `width`, returning one plain-text row per
 // content row (raw cell text, rows through the last non-blank one; interior
@@ -66,6 +78,14 @@ int MapTogglePosition(const ftxui::Element& old_tree,
                       const std::vector<Heading>& headings, int old_selected,
                       int viewport_width, int viewport_height,
                       bool old_is_scroll, int* new_height_out = nullptr);
+
+// Cached-fingerprint overload for callers that retain a document revision.
+int MapTogglePosition(const ftxui::Element& old_tree,
+                      const ftxui::Element& new_tree,
+                      int old_selected, int viewport_width, int viewport_height,
+                      bool old_is_scroll,
+                      const HeadingFingerprints& fingerprints,
+                      int* new_height_out = nullptr);
 
 }  // namespace markit
 

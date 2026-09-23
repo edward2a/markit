@@ -633,8 +633,9 @@ TEST(Anchor, LocateHeadingRowsFindsSectionsInOrder) {
   auto tree = markit::RenderMarkdown(doc, ScrollCfg());
   const auto headings = markit::ExtractHeadings(doc);
   ASSERT_EQ(headings.size(), 2u);
+  const auto fingerprints = markit::BuildHeadingFingerprints(headings);
   const auto map =
-      markit::LocateHeadingRows(tree, headings, kWidth, kHeight, true);
+      markit::LocateHeadingRows(tree, kWidth, kHeight, true, fingerprints);
   ASSERT_EQ(map.size(), 2u);
   EXPECT_EQ(map[0].first, 0);
   EXPECT_EQ(map[0].second, 0);

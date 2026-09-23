@@ -295,9 +295,9 @@ std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
   return rows;
 }
 
-std::vector<std::string> BuildHeadingFingerprints(
+HeadingFingerprints BuildHeadingFingerprintsInternal(
     const std::vector<Heading>& headings) {
-  std::vector<std::string> fingerprints;
+  HeadingFingerprints fingerprints;
   fingerprints.reserve(headings.size());
   for (const Heading& heading : headings) {
     fingerprints.push_back(Fingerprint(Normalize(heading.text)));
@@ -427,6 +427,11 @@ std::optional<int> HeadingAnchor(const std::vector<int>& old_bounds,
 
 }  // namespace
 
+HeadingFingerprints BuildHeadingFingerprints(
+    const std::vector<Heading>& headings) {
+  return BuildHeadingFingerprintsInternal(headings);
+}
+
 // Render the tree offscreen at `width` and return the raw cell text of every
 // row through the last non-blank one (same row identity as the anonymous
 // RenderRows above, but un-normalized: search matches what the user sees).
@@ -485,9 +490,10 @@ int SearchExtractWidth(const ftxui::Element& tree, int viewport_width,
 
 int MapTogglePosition(const ftxui::Element& old_tree,
                       const ftxui::Element& new_tree,
-                      const std::vector<Heading>& headings, int old_selected,
-                      int viewport_width, int viewport_height,
-                      bool old_is_scroll, int* new_height_out) {
+                      int old_selected, int viewport_width, int viewport_height,
+                      bool old_is_scroll,
+                      const HeadingFingerprints& heading_fingerprints,
+                      int* new_height_out) {
   if (!old_tree || !new_tree || viewport_width < 1 || viewport_height < 1) {
     return 0;
   }
@@ -534,8 +540,6 @@ int MapTogglePosition(const ftxui::Element& old_tree,
       old_narrow[idx].clipped &&
       CountWords(old_narrow[idx].text, kAnchorWords) < kAnchorWords;
 
-  const std::vector<std::string> heading_fingerprints =
-      BuildHeadingFingerprints(headings);
   std::vector<int> old_bounds =
       FindHeadingRows(old_narrow, heading_fingerprints);
   std::vector<int> new_bounds =
@@ -597,9 +601,26 @@ int MapTogglePosition(const ftxui::Element& old_tree,
   return std::clamp(pos + delta, 0, new_max);
 }
 
+int MapTogglePosition(const ftxui::Element& old_tree,
+                      const ftxui::Element& new_tree,
+                      const std::vector<Heading>& headings, int old_selected,
+                      int viewport_width, int viewport_height,
+                      bool old_is_scroll, int* new_height_out) {
+  return MapTogglePosition(old_tree, new_tree, old_selected, viewport_width,
+                           viewport_height, old_is_scroll,
+                           BuildHeadingFingerprints(headings), new_height_out);
+}
+
 std::vector<std::pair<int, int>> LocateHeadingRows(
     const ftxui::Element& tree, const std::vector<Heading>& headings,
     int width, int viewport_height, bool is_scroll) {
+  return LocateHeadingRows(tree, width, viewport_height, is_scroll,
+                           BuildHeadingFingerprints(headings));
+}
+
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const ftxui::Element& tree, int width, int viewport_height, bool is_scroll,
+    const HeadingFingerprints& heading_fingerprints) {
   std::vector<std::pair<int, int>> located;
   if (!tree || width < 1 || viewport_height < 1) {
     return located;
@@ -613,8 +634,6 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
   if (rows.empty()) {
     return located;
   }
-  const std::vector<std::string> heading_fingerprints =
-      BuildHeadingFingerprints(headings);
   MatchHeadingRows(
       rows, heading_fingerprints,
       [&](std::size_t row, std::size_t heading) {

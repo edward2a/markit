@@ -178,6 +178,10 @@ int main(int argc, char** argv) {
   // Static nav content: headings extracted once (no interaction yet).
   const std::vector<markit::Heading> headings =
       markit::ExtractHeadings(contents);
+  // Heading text is immutable for the lifetime of the viewer. Normalize it
+  // once so resize, navigation, and mode-toggle remaps reuse the same cache.
+  const markit::HeadingFingerprints heading_fingerprints =
+      markit::BuildHeadingFingerprints(headings);
 
   // Nav-highlight cache: heading (row, heading-index) pairs for the live
   // content tree. Locating headings needs an offscreen layout, so it runs
@@ -316,9 +320,9 @@ int main(int argc, char** argv) {
     if (cached_content && viewport_width >= 1 && viewport_height >= 1 &&
         (!hl_tree || hl_tree.get() != cached_content.get() ||
          hl_width != viewport_width || hl_scroll != hscroll)) {
-      hl_map = markit::LocateHeadingRows(cached_content, headings,
-                                         viewport_width, viewport_height,
-                                         hscroll);
+      hl_map = markit::LocateHeadingRows(cached_content, viewport_width,
+                                         viewport_height, hscroll,
+                                         heading_fingerprints);
       hl_tree = cached_content;
       hl_width = viewport_width;
       hl_scroll = hscroll;
@@ -918,9 +922,9 @@ int main(int argc, char** argv) {
       cached_content = fresh;
       rendered_mode = content_cfg.horizontal_wrap;
       int new_height = 0;
-      selected = markit::MapTogglePosition(old_tree, fresh, headings, selected,
-                                           viewport_width, viewport_height,
-                                           old_is_scroll, &new_height);
+      selected = markit::MapTogglePosition(
+          old_tree, fresh, selected, viewport_width, viewport_height,
+          old_is_scroll, heading_fingerprints, &new_height);
       if (!hscroll) {
         // Toggle target is wrap: hand the anchor's new-tree row count to the
         // scroller so it adopts the height instead of re-measuring.

@@ -190,6 +190,8 @@ void BenchmarkFixture(const Fixture& fixture, const Options& options) {
       }));
 
   const auto headings = markit::ExtractHeadings(fixture.markdown);
+  const auto heading_fingerprints =
+      markit::BuildHeadingFingerprints(headings);
   const auto scroll_rows = markit::RenderTextRows(
       scroll_tree, scroll_width, scroll_hint);
   const int toggle_selected =
@@ -201,17 +203,20 @@ void BenchmarkFixture(const Fixture& fixture, const Options& options) {
         const auto new_tree = markit::RenderMarkdown(fixture.markdown, wrap);
         int new_height = 0;
         return static_cast<std::size_t>(markit::MapTogglePosition(
-            old_tree, new_tree, headings, toggle_selected,
-            fixture.viewport_width, 24, /*old_is_scroll=*/true, &new_height));
+             old_tree, new_tree, toggle_selected, fixture.viewport_width, 24,
+             /*old_is_scroll=*/true,
+             heading_fingerprints, &new_height));
       }));
 
   const auto heading_stress = HeadingStressFixture(headings);
+  const auto heading_stress_fingerprints =
+      markit::BuildHeadingFingerprints(heading_stress);
   PrintResult(
       "heading_mapping", fixture, options,
       Measure(options, [&] {
         return markit::LocateHeadingRows(
-                   wrap_tree, heading_stress, fixture.viewport_width, 24,
-                   /*is_scroll=*/false)
+                   wrap_tree, fixture.viewport_width, 24,
+                   /*is_scroll=*/false, heading_stress_fingerprints)
             .size();
       }));
 
