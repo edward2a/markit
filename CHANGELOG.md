@@ -14,6 +14,7 @@ Versions are ordered newest-first: new change lines append inside the top sectio
 ## 0.0.9 - 2026-09-29T21:05:00Z
 
 - 2026-09-29T21:05:00Z - mod - Append explicit -std=c++17 to CMAKE_CXX_FLAGS for GNU, Clang, and AppleClang toolchains so fetched subprojects receive the required language mode while preserving caller-supplied flags; retain CMake's C++17 standard properties; configure/build and 2/2 tests pass
+- 2026-09-29T23:19:38Z - mod - Persist the explicit C++17 compiler flag in the CMAKE_CXX_FLAGS cache so Abseil's configure-time language probe receives it; clear a cached negative probe result to retry after correcting an earlier C++ standard failure; verify configure, full build, and 2/2 tests with a simulated C++14 input flag
 
 ## 0.0.8 - 2026-09-22T20:33:46Z
 
