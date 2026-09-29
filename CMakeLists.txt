@@ -124,6 +124,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Enforce the strict ISO standard (-std=c++17) instead of the GNU dialect
 # (-std=gnu++17), so the build does not depend on the toolchain default.
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Also pass the standard flag globally so fetched subprojects receive it.
+if (CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+  string(APPEND CMAKE_CXX_FLAGS " -std=c++17")
+endif()
 
 option(MARKIT_BUILD_TESTS "Build markit tests" ON)
 option(MARKIT_BUILD_PUBLIC_HEADER_CHECKS

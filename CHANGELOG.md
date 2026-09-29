@@ -11,6 +11,10 @@ Versions are ordered newest-first: new change lines append inside the top sectio
 
 ---
 
+## 0.0.9 - 2026-09-29T21:05:00Z
+
+- 2026-09-29T21:05:00Z - mod - Append explicit -std=c++17 to CMAKE_CXX_FLAGS for GNU, Clang, and AppleClang toolchains so fetched subprojects receive the required language mode while preserving caller-supplied flags; retain CMake's C++17 standard properties; configure/build and 2/2 tests pass
+
 ## 0.0.8 - 2026-09-22T20:33:46Z
 
 - 2026-09-22T20:33:46Z - add - Opt-in `markit-bench` performance target with deterministic small, large, wrapped, and wide fixtures, warmup/sample controls, CSV timing output, and `make bench`
