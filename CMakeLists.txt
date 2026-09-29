@@ -124,6 +124,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Enforce the strict ISO standard (-std=c++17) instead of the GNU dialect
 # (-std=gnu++17), so the build does not depend on the toolchain default.
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Pass the flag through the cache so configure-time compiler probes and fetched
+# subprojects receive it as well.
+if (CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+  string(FIND "${CMAKE_CXX_FLAGS}" "-std=c++17" _markit_cxx17_flag)
+  if (_markit_cxx17_flag EQUAL -1)
+    string(STRIP "${CMAKE_CXX_FLAGS} -std=c++17" _markit_cxx_flags)
+    set(CMAKE_CXX_FLAGS "${_markit_cxx_flags}" CACHE STRING
+        "Flags used by the CXX compiler during all build types" FORCE)
+  endif()
+endif()
 
 option(MARKIT_BUILD_TESTS "Build markit tests" ON)
 option(MARKIT_BUILD_PUBLIC_HEADER_CHECKS
@@ -179,6 +189,11 @@ FetchContent_Declare(abseil
   GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
   GIT_TAG        20250814.1
 )
+# Retry a failed cached probe from an earlier configure without the C++17 flag.
+if (DEFINED ABSL_INTERNAL_AT_LEAST_CXX17 AND
+    NOT ABSL_INTERNAL_AT_LEAST_CXX17)
+  unset(ABSL_INTERNAL_AT_LEAST_CXX17 CACHE)
+endif()
 FetchContent_MakeAvailable(abseil)
 
 FetchContent_Declare(re2
