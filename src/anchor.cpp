@@ -5,6 +5,7 @@
 #include <cmath>      // for llround
 #include <cstdlib>    // for abs
 #include <memory>     // for make_shared
+#include <mutex>      // for recursive_mutex
 #include <optional>  // for optional
 #include <string>     // for string, to_string
 #include <utility>    // for pair
@@ -199,7 +200,9 @@ class BoxCapture final : public ftxui::Node {
 // its last window; overlapping rows are skipped by the caller.
 template <typename Callback>
 void ForEachRenderChunk(const ftxui::Element& tree, int width,
-                        Callback&& callback) {
+                        Callback&& callback,
+                        std::recursive_mutex* render_guard = nullptr,
+                        const std::function<bool()>& cancelled = {}) {
   if (!tree) {
     return;
   }
@@ -209,6 +212,9 @@ void ForEachRenderChunk(const ftxui::Element& tree, int width,
       ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
                             ftxui::Dimension::Fixed(chunk_rows));
   for (int requested_start = 0;; requested_start += chunk_rows) {
+    if (cancelled && cancelled()) {
+      break;  // caller must treat the partial extraction as incomplete.
+    }
     ftxui::Box content_box;
     ftxui::Element captured =
         std::make_shared<BoxCapture>(tree, &content_box);
@@ -217,8 +223,17 @@ void ForEachRenderChunk(const ftxui::Element& tree, int width,
         ftxui::focusPosition(0, requested_start + (chunk_rows - 1) / 2) |
         ftxui::yframe;
 
-    screen.Clear();
-    ftxui::Render(screen, window);
+    // Lock the shared render guard around just this window's FTXUI render,
+    // never the whole extraction, so a background caller releases it between
+    // windows and the foreground can interleave input/draw work.
+    if (render_guard != nullptr) {
+      std::lock_guard<std::recursive_mutex> lock(*render_guard);
+      screen.Clear();
+      ftxui::Render(screen, window);
+    } else {
+      screen.Clear();
+      ftxui::Render(screen, window);
+    }
 
     const int actual_start = std::max(0, -content_box.y_min);
     const int first_row = std::max(requested_start, actual_start);
@@ -244,7 +259,9 @@ void ForEachRenderChunk(const ftxui::Element& tree, int width,
 // `may_reflow` selects the seed: wrap trees multiply rows at narrow widths
 // (scale by the reflow ratio), scroll trees never split rows (no scaling).
 std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
-                            int min_x, int viewport_height, bool may_reflow) {
+                            int min_x, int viewport_height, bool may_reflow,
+                            std::recursive_mutex* render_guard = nullptr,
+                            const std::function<bool()>& cancelled = {}) {
   const int ratio = may_reflow ? std::max(1, (min_x + width - 1) / width) : 1;
   const int reserve_rows = SeedCap(min_y, viewport_height, ratio);
   std::vector<Row> rows;
@@ -288,7 +305,7 @@ std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
         last = global_row;
       }
     }
-  });
+  }, render_guard, cancelled);
   if (last + 1 < static_cast<int>(rows.size())) {
     rows.resize(static_cast<size_t>(last + 1));
   }
@@ -438,7 +455,9 @@ HeadingFingerprints BuildHeadingFingerprints(
 // The height hint remains a reserve hint for the returned rows; bounded
 // windows remove the old full-height screen and no longer need a grow loop.
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
-                                         int height_hint) {
+                                        int height_hint,
+                                        std::recursive_mutex* render_guard,
+                                        const std::function<bool()>& cancelled) {
   width = std::clamp(width, 1, 8192);
   std::vector<std::string> rows;
   rows.reserve(static_cast<size_t>(std::clamp(height_hint, 1,
@@ -469,7 +488,7 @@ std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
         last = global_row;
       }
     }
-  });
+  }, render_guard, cancelled);
   if (last + 1 < static_cast<int>(rows.size())) {
     rows.resize(static_cast<size_t>(last + 1));
   }

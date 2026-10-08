@@ -555,6 +555,37 @@ TEST(Config, LoadConfig_KeybindingsRemapFreesOldKey) {
   std::remove(path.c_str());
 }
 
+// A valid swap loads in either YAML order: each key still ends up bound to
+// exactly one action, so deferring conflict checks to the final map is
+// order-independent.
+TEST(Config, LoadConfig_KeybindingsSwapBothOrders) {
+  const std::string order1 =
+      TempYaml("keybindings:\n  scroll_up: [down]\n  scroll_down: [up]\n");
+  const markit::Config cfg1 = markit::LoadConfig(order1);
+  EXPECT_EQ(cfg1.keybindings.scroll_up,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowDown}));
+  EXPECT_EQ(cfg1.keybindings.scroll_down,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowUp}));
+  std::remove(order1.c_str());
+
+  const std::string order2 =
+      TempYaml("keybindings:\n  scroll_down: [up]\n  scroll_up: [down]\n");
+  const markit::Config cfg2 = markit::LoadConfig(order2);
+  EXPECT_EQ(cfg2.keybindings.scroll_up,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowDown}));
+  EXPECT_EQ(cfg2.keybindings.scroll_down,
+            (std::vector<ftxui::Event>{ftxui::Event::ArrowUp}));
+  std::remove(order2.c_str());
+}
+
+// Moving one action onto another action's still-default key is a real
+// conflict, not a swap, and fails regardless of order.
+TEST(Config, LoadConfig_KeybindingsCollisionWithUnmovedDefaultThrows) {
+  const std::string path = TempYaml("keybindings:\n  scroll_up: [down]\n");
+  EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);
+  std::remove(path.c_str());
+}
+
 TEST(Config, LoadConfig_KeybindingsUnknownActionThrows) {
   const std::string path = TempYaml("keybindings:\n  scroll_sideways: [x]\n");
   EXPECT_THROW(markit::LoadConfig(path), std::runtime_error);

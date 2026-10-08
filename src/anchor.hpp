@@ -10,8 +10,10 @@
 #define MARKIT_ANCHOR_HPP
 
 #include <string>   // for string
+#include <functional>  // for function
+#include <mutex>    // for recursive_mutex
 #include <utility>  // for pair
-#include <vector>  // for vector
+#include <vector>   // for vector
 
 #include <ftxui/dom/elements.hpp>  // for Element
 
@@ -48,9 +50,15 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
 // vertical windows, so `height_hint` is only a reserve hint for the returned
 // rows. Wrap trees render at the viewport width; scroll trees render wide (they
 // never split rows, so indices stay stable while clipped text becomes
-// searchable) — callers choose the width.
+// searchable) — callers choose the width. When `render_guard` is non-null it is
+// locked around each per-window FTXUI render (not the whole extraction) so a
+// background caller cannot monopolize the shared render guard. When `cancelled`
+// is set and returns true between windows the extraction stops early; callers
+// must treat an early stop as incomplete, not as a full row set.
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
-                                        int height_hint);
+                                        int height_hint,
+                                        std::recursive_mutex* render_guard = nullptr,
+                                        const std::function<bool()>& cancelled = {});
 
 // Extract width for search rows: the viewport width in wrap mode; in scroll
 // mode the tree's natural width, so clipped text is searchable while row

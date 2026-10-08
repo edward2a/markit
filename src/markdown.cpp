@@ -2,11 +2,19 @@
 #include "markdown.hpp"
 
 #include "config.hpp"
+#include "entity_decode.hpp"
 
 #include <md4c.h>
 
+#include <ftxui/dom/node.hpp>       // for Node (combining-unit text node)
+#include <ftxui/screen/box.hpp>     // for Box (combining-unit text node)
+#include <ftxui/screen/screen.hpp>  // for Screen (combining-unit text node)
+#include <ftxui/screen/string.hpp>  // for Utf8ToGlyphs (combining-unit split)
+
 #include <algorithm>  // for max
 #include <cctype>     // for tolower/isspace/isalnum (HTML tag parsing)
+#include <cstdint>    // for uint32_t (UTF-8 validation)
+#include <memory>     // for make_shared
 #include <string>     // for string, to_string
 #include <string_view>  // for string_view
 #include <utility>    // for move
@@ -21,9 +29,347 @@ using ftxui::Decorator;
 using ftxui::Element;
 using ftxui::Elements;
 
-std::string Attr(const MD_ATTRIBUTE& attr) {
-  // md4c attribute text is not null-terminated and may be absent (NULL).
-  return attr.text ? std::string(attr.text, attr.size) : std::string();
+// Decode an md4c attribute (e.g. a link/image href or title) exactly once:
+// typed MD_TEXT_ENTITY substrings are decoded, everything else is copied
+// verbatim. Invalid numeric scalars are flagged so link destinations can be
+// rejected rather than rewritten.
+DecodedDestination DecodeMdAttribute(const MD_ATTRIBUTE& attr) {
+  DecodedDestination result;
+  if (attr.text == nullptr) {
+    return result;
+  }
+  if (attr.substr_types == nullptr || attr.substr_offsets == nullptr) {
+    result.text.assign(attr.text, attr.size);
+    return result;
+  }
+  // md4c guarantees substr_offsets has one more entry than substr_types and
+  // that the final offset equals attr.size, so reading substr_offsets[k + 1]
+  // while substr_offsets[k] < attr.size stays in bounds. Each piece is still
+  // validated and malformed metadata stops the walk rather than being trusted.
+  size_t k = 0;
+  while (attr.substr_offsets[k] < attr.size) {
+    const size_t start = attr.substr_offsets[k];
+    const size_t end = attr.substr_offsets[k + 1];
+    if (start > end || end > attr.size) {
+      break;  // defensive: malformed metadata; keep what we have.
+    }
+    const std::string_view piece(attr.text + start, end - start);
+    if (attr.substr_types[k] == MD_TEXT_ENTITY) {
+      std::string decoded;
+      switch (DecodeEntityReference(piece, &decoded)) {
+        case EntityDecodeStatus::kNotEntity:
+          result.text.append(piece);
+          break;
+        case EntityDecodeStatus::kInvalid:
+          result.invalid = true;
+          result.text.append("\xEF\xBF\xBD");
+          break;
+        case EntityDecodeStatus::kDecoded:
+          result.text += decoded;
+          break;
+      }
+    } else {
+      result.text.append(piece);
+    }
+    ++k;
+  }
+  return result;
+}
+
+// True when `s` is a safe OSC 8 hyperlink target: well-formed UTF-8 with no
+// C0 (U+0000-001F), DEL (U+007F) or C1 (U+0080-009F) code points. Entity
+// decoding can introduce such controls that never appeared in the source
+// bytes, so destinations are validated after decoding, never by stripping or
+// rewriting them. Valid non-ASCII links are preserved.
+bool IsSafeLinkDestination(std::string_view s) {
+  static const uint32_t kMinCodePoint[5] = {0, 0, 0x80, 0x800, 0x10000};
+  size_t i = 0;
+  const size_t n = s.size();
+  while (i < n) {
+    const unsigned char lead = static_cast<unsigned char>(s[i]);
+    uint32_t cp = 0;
+    size_t len = 0;
+    if (lead < 0x80) {
+      cp = lead;
+      len = 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+      cp = lead & 0x1F;
+      len = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+      cp = lead & 0x0F;
+      len = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+      cp = lead & 0x07;
+      len = 4;
+    } else {
+      return false;  // stray continuation byte or invalid lead byte.
+    }
+    if (i + len > n) {
+      return false;  // truncated sequence.
+    }
+    for (size_t k = 1; k < len; ++k) {
+      const unsigned char cont = static_cast<unsigned char>(s[i + k]);
+      if ((cont & 0xC0) != 0x80) {
+        return false;
+      }
+      cp = (cp << 6) | (cont & 0x3F);
+    }
+    if (len >= 2 && cp < kMinCodePoint[len]) {
+      return false;  // overlong encoding.
+    }
+    if (cp > 0x10FFFF) {
+      return false;  // beyond Unicode range.
+    }
+    if (cp >= 0xD800 && cp <= 0xDFFF) {
+      return false;  // UTF-8-encoded surrogate: not a valid scalar.
+    }
+    if (cp <= 0x1F || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F)) {
+      return false;  // C0 / DEL / C1.
+    }
+    i += len;
+  }
+  return true;
+}
+
+// Decode one UTF-8 code point at `start`. Returns false for a malformed or
+// truncated sequence; `*len` is the byte length on success.
+bool DecodeUtf8(std::string_view s, size_t start, uint32_t* cp, size_t* len) {
+  const unsigned char b0 = static_cast<unsigned char>(s[start]);
+  uint32_t value = 0;
+  size_t need = 0;
+  if (b0 < 0x80) {
+    value = b0;
+    need = 1;
+  } else if ((b0 & 0xE0) == 0xC0) {
+    value = b0 & 0x1F;
+    need = 2;
+  } else if ((b0 & 0xF0) == 0xE0) {
+    value = b0 & 0x0F;
+    need = 3;
+  } else if ((b0 & 0xF8) == 0xF0) {
+    value = b0 & 0x07;
+    need = 4;
+  } else {
+    return false;
+  }
+  if (start + need > s.size()) {
+    return false;
+  }
+  for (size_t k = 1; k < need; ++k) {
+    const unsigned char c = static_cast<unsigned char>(s[start + k]);
+    if ((c & 0xC0) != 0x80) {
+      return false;
+    }
+    value = (value << 6) | (c & 0x3F);
+  }
+  *cp = value;
+  *len = need;
+  return true;
+}
+
+bool IsControlCodePoint(uint32_t cp) {
+  return cp == 0 || cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F);
+}
+
+// Expand horizontal tabs in a code/verbatim line to four-display-column stops
+// measured from logical column zero of the source line (the surrounding border
+// is not part of the line). Columns advance by each code point's display width
+// (wide glyphs two, combining marks zero), not by leading-byte count. Callers
+// expand before wrapping so a tab never counts as one column or wraps as a bare
+// separator; source data is unchanged.
+std::string ExpandTabs(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  int col = 0;
+  size_t i = 0;
+  while (i < s.size()) {
+    if (s[i] == '\t') {
+      const int spaces = 4 - (col % 4);
+      out.append(static_cast<size_t>(spaces), ' ');
+      col += spaces;
+      ++i;
+      continue;
+    }
+    if (s[i] == '\n') {
+      out.push_back('\n');
+      col = 0;  // tab stops reset at source newlines.
+      ++i;
+      continue;
+    }
+    const unsigned char lead = static_cast<unsigned char>(s[i]);
+    uint32_t cp = 0;
+    size_t len = 0;
+    if (!DecodeUtf8(s, i, &cp, &len)) {
+      len = 1;  // malformed/truncated: copy one byte, never a tab/newline.
+    }
+    const std::string_view cp_bytes = s.substr(i, len);
+    out.append(cp_bytes);
+    col += ftxui::string_width(cp_bytes);
+    i += len;
+  }
+  return out;
+}
+
+// Number of leading bytes of `s` that FTXUI's Utf8ToGlyphs would discard: a
+// combining mark or control code point with no preceding glyph to attach to.
+// Querying the renderer's own glyph grouping keeps the combining-unit split
+// exact instead of duplicating (and drifting from) FTXUI's Unicode tables.
+size_t LeadingDroppedGlyphBytes(std::string_view s) {
+  if (s.empty()) {
+    return 0;
+  }
+  // Fast path: a leading base glyph (a non-control code point of nonzero
+  // width) is never dropped, so no glyph grouping is needed.
+  uint32_t cp = 0;
+  size_t len = 0;
+  if (DecodeUtf8(s, 0, &cp, &len) && !IsControlCodePoint(cp) &&
+      ftxui::string_width(s.substr(0, len)) > 0) {
+    return 0;
+  }
+  const std::vector<std::string> glyphs = ftxui::Utf8ToGlyphs(s);
+  if (glyphs.empty()) {
+    return s.size();  // every code point is dropped (no base to attach to).
+  }
+  const size_t first = s.find(glyphs.front());
+  return first == std::string_view::npos ? 0 : first;
+}
+
+// True when `s` contains a combining mark (a code point FTXUI would attach to
+// the preceding glyph). Combining marks are always non-ASCII, so pure ASCII
+// text skips the scan.
+bool ContainsCombiningMark(std::string_view s) {
+  bool non_ascii = false;
+  for (const unsigned char c : s) {
+    if (c >= 0x80) {
+      non_ascii = true;
+      break;
+    }
+  }
+  if (!non_ascii) {
+    return false;
+  }
+  size_t i = 0;
+  while (i < s.size()) {
+    uint32_t cp = 0;
+    size_t len = 0;
+    if (!DecodeUtf8(s, i, &cp, &len)) {
+      ++i;
+      continue;
+    }
+    if (!IsControlCodePoint(cp) && ftxui::string_width(s.substr(i, len)) == 0) {
+      return true;
+    }
+    i += len;
+  }
+  return false;
+}
+
+// Text node that groups each base code point with its following combining
+// marks before cells are laid out. FTXUI's text() emits a wide base's
+// continuation cell immediately, so a combining mark after a wide base lands in
+// the continuation cell instead of the base cell. This node keeps the whole
+// base-plus-marks unit in the leading cell and reserves an empty continuation,
+// matching the combining-unit contract. Newlines still start new rows, like
+// text(). It is used only for fragments that contain a combining mark; ordinary
+// text keeps FTXUI's text() (and its selection support).
+class CombiningText : public ftxui::Node {
+ public:
+  explicit CombiningText(std::string_view text) {
+    Build(text);
+    requirement_.min_x = max_width_;
+    requirement_.min_y = static_cast<int>(lines_.size());
+  }
+
+  void ComputeRequirement() override {}
+
+  void Render(ftxui::Screen& screen) override {
+    const ftxui::Box visible = ftxui::Box::Intersection(screen.stencil, box_);
+    if (visible.IsEmpty()) {
+      return;
+    }
+    const size_t first_line = static_cast<size_t>(visible.y_min - box_.y_min);
+    const size_t last_line =
+        std::min<size_t>(static_cast<size_t>(visible.y_max - box_.y_min + 1),
+                         lines_.size());
+    for (size_t line = first_line; line < last_line; ++line) {
+      const int y = box_.y_min + static_cast<int>(line);
+      int x = box_.x_min;
+      for (const std::string& glyph : lines_[line]) {
+        if (x > visible.x_max) {
+          break;
+        }
+        if (x >= visible.x_min) {
+          screen.CellAt(x, y).character = glyph;
+        }
+        ++x;
+      }
+    }
+  }
+
+ private:
+  struct Unit {
+    std::string text;
+    bool wide;
+  };
+
+  void Build(std::string_view text) {
+    std::vector<Unit> units;
+    auto flush = [&]() {
+      lines_.emplace_back();
+      std::vector<std::string>& line = lines_.back();
+      for (Unit& unit : units) {
+        line.push_back(std::move(unit.text));
+        if (unit.wide) {
+          line.emplace_back();
+        }
+      }
+      max_width_ = std::max(max_width_, static_cast<int>(line.size()));
+      units.clear();
+    };
+    size_t i = 0;
+    while (i < text.size()) {
+      uint32_t cp = 0;
+      size_t len = 0;
+      if (!DecodeUtf8(text, i, &cp, &len)) {
+        ++i;  // drop an invalid byte, matching Utf8ToGlyphs.
+        continue;
+      }
+      const std::string_view bytes(text.data() + i, len);
+      if (cp == '\n') {
+        flush();
+        i += len;
+        continue;
+      }
+      if (IsControlCodePoint(cp)) {
+        i += len;
+        continue;
+      }
+      const int width = ftxui::string_width(bytes);
+      if (width == 0) {
+        if (!units.empty()) {
+          units.back().text.append(bytes);  // combining mark joins its base.
+        }
+        i += len;
+        continue;
+      }
+      units.push_back(Unit{std::string(bytes), width >= 2});
+      i += len;
+    }
+    flush();
+  }
+
+  std::vector<std::vector<std::string>> lines_;
+  int max_width_ = 0;
+};
+
+Element StyledText(std::string text, const Decorator& style) {
+  Element e = ContainsCombiningMark(text)
+                  ? std::make_shared<CombiningText>(text)
+                  : ftxui::text(std::move(text));
+  if (style) {
+    e = style(std::move(e));
+  }
+  return e;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,32 +613,51 @@ class Renderer {
   // Split a row's fragments into word elements for wrap mode. A "word" is a
   // maximal run of non-space text; it may span several styled fragments (e.g.
   // `[a](url)b`), whose pieces are glued into one element so the wrap layout
-  // never breaks inside a word. Inter-word whitespace is glued ahead of the
-  // following word so the wrapping point lands exactly at the source's
-  // whitespace, and it keeps the word's style when the preceding piece has
-  // the same style key (whitespace *inside* a styled run, e.g. a multi-word
-  // link label, stays underlined like scroll mode renders it); at a style
-  // boundary it stays a plain piece. Overlong tokens (longer than the
-  // viewport) are never split mid-word; they clip. Trailing whitespace is
-  // kept as a final plain piece so an all-space row keeps its height.
+  // never breaks inside a word. Inter-word whitespace is appended to the
+  // *preceding* word so a soft wrap consumes the separator instead of charging
+  // its width against the next word (which used to clip a word that otherwise
+  // fit). Same-row separator text and styling are preserved: a separator keeps
+  // the run's style only when it is internal to one styled run (same key
+  // before and after); a gap between different runs stays plain. Source
+  // indentation leads the first visual row. Overlong tokens are never split
+  // mid-word; they clip. An all-space row keeps one atom so its height
+  // survives.
   Element WrapRow(const std::vector<Fragment>& fragments) {
     struct Piece {
       std::string text;
       Decorator style;
       std::string key;
+      bool space;
     };
+    auto is_space = [](char c) {
+      return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+
+    // Flatten fragments into alternating whitespace/non-whitespace runs. Tabs
+    // and newlines normalize to spaces so no text() element ever contains
+    // "\n" (hflow would break the row on it, stranding styled spaces).
+    std::vector<Piece> runs;
+    for (const auto& frag : fragments) {
+      size_t i = 0;
+      const size_t n = frag.text.size();
+      while (i < n) {
+        const bool sp = is_space(frag.text[i]);
+        size_t j = i;
+        while (j < n && is_space(frag.text[j]) == sp) {
+          ++j;
+        }
+        Piece p;
+        p.text = sp ? std::string(j - i, ' ') : frag.text.substr(i, j - i);
+        p.style = frag.style;
+        p.key = frag.style_key;
+        p.space = sp;
+        runs.push_back(std::move(p));
+        i = j;
+      }
+    }
+
     Elements words;
     std::vector<Piece> cur;
-    std::string pending;
-    // Style key of the fragment run that produced `pending`. A whitespace run
-    // keeps the following word's style only when it comes from the same styled
-    // run (e.g. spaces inside one link label): whitespace carried across a
-    // fragment boundary from a *different* run stays plain, so two adjacent
-    // links sharing one URL (e.g. badges with href="#") don't get their gap
-    // underlined. A run spanning style boundaries degrades to plain ("").
-    std::string pending_key;
-    std::string last_key;  // style key of the previously emitted piece.
-
     auto finish = [&]() {
       if (cur.empty()) {
         return;
@@ -300,72 +665,88 @@ class Renderer {
       Elements pieces;
       pieces.reserve(cur.size());
       for (auto& piece : cur) {
-        Element e = ftxui::text(std::move(piece.text));
-        if (piece.style) {
-          e = piece.style(std::move(e));
-        }
-        pieces.push_back(std::move(e));
+        pieces.push_back(StyledText(std::move(piece.text), piece.style));
       }
-      last_key = cur.back().key;
       words.push_back(pieces.size() == 1 ? std::move(pieces[0])
                                          : ftxui::hbox(std::move(pieces)));
       cur.clear();
     };
 
-    auto is_space = [](char c) {
-      return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-    };
-
-    for (auto& frag : fragments) {
-      size_t i = 0;
-      const size_t n = frag.text.size();
-      while (i < n) {
-        if (is_space(frag.text[i])) {
-          size_t j = i;
-          while (j < n && is_space(frag.text[j])) {
-            ++j;
+    size_t i = 0;
+    const size_t m = runs.size();
+    // Leading whitespace is source indentation: it stays on the first visual
+    // row, glued ahead of the first word.
+    if (i < m && runs[i].space) {
+      cur.push_back(std::move(runs[i]));
+      ++i;
+    }
+    while (i < m) {
+      if (!runs[i].space) {
+        cur.push_back(std::move(runs[i]));
+        ++i;
+        // Append the following separator (if any) to this atom. It keeps the
+        // run's style only when it is internal to one styled run.
+        if (i < m && runs[i].space) {
+          std::string after_key;
+          bool has_after = false;
+          for (size_t k = i + 1; k < m; ++k) {
+            if (!runs[k].space) {
+              after_key = runs[k].key;
+              has_after = true;
+              break;
+            }
           }
-          if (!cur.empty()) {
-            finish();
+          const std::string before_key = cur.back().key;
+          const std::string space_key = runs[i].key;
+          const bool internal =
+              has_after && space_key == before_key && space_key == after_key;
+          Piece sep = std::move(runs[i]);
+          if (!internal) {
+            sep.style = Decorator(nullptr);
+            sep.key.clear();
           }
-          // Inter-word whitespace: normalize tabs/newlines to spaces so no
-          // text() element ever contains "\n" (hflow would break the row on
-          // it, stranding styled spaces on the next visual line).
-          if (pending.empty()) {
-            pending_key = frag.style_key;
-          } else if (frag.style_key != pending_key) {
-            pending_key.clear();  // run spans styles: stays plain.
-          }
-          pending.append(j - i, ' ');
-          i = j;
-        } else {
-          size_t j = i;
-          while (j < n && !is_space(frag.text[j])) {
-            ++j;
-          }
-          if (!pending.empty()) {
-            // Same-style run: the space belongs to the styled text (scroll
-            // mode renders it as one continuous element), so keep the style.
-            // At a style boundary the space stays plain.
-            const bool internal = (pending_key == frag.style_key &&
-                                   last_key == frag.style_key);
-            cur.push_back({std::move(pending),
-                           internal ? frag.style : Decorator(nullptr),
-                           internal ? frag.style_key : std::string()});
-            pending.clear();
-          }
-          pending.append(frag.text, i, j - i);
-          cur.push_back({std::move(pending), frag.style, frag.style_key});
-          pending.clear();
-          i = j;
+          cur.push_back(std::move(sep));
+          ++i;
         }
+        finish();
+      } else {
+        // A whitespace run with no preceding word (e.g. after a consumed
+        // leading run): keep it as its own atom so height is preserved.
+        cur.push_back(std::move(runs[i]));
+        ++i;
+        finish();
       }
     }
     finish();
-    if (!pending.empty()) {
-      words.push_back(ftxui::text(std::move(pending)));
-    }
     return ftxui::hflow(std::move(words));
+  }
+
+  // Rebuild base-plus-combining units across styled-fragment boundaries. md4c
+  // can deliver a combining mark (or a decoded combining entity) at the start
+  // of a new fragment; FTXUI drops a combining mark that begins its own text
+  // node, so the mark must move into the preceding base fragment. The base's
+  // style and hyperlink own the whole unit; a differently styled or linked mark
+  // never overrides the base. Leading controls move the same way (they render
+  // as nothing either way). A mark with no preceding base keeps its current
+  // behavior. This is the focused combining-sequence scope, not full
+  // extended-grapheme support.
+  void CoalesceCombiningUnits(std::vector<Fragment>& fragments) {
+    std::vector<Fragment> out;
+    out.reserve(fragments.size());
+    for (auto& frag : fragments) {
+      if (frag.text.empty()) {
+        continue;
+      }
+      const size_t lead = LeadingDroppedGlyphBytes(frag.text);
+      if (lead > 0 && !out.empty()) {
+        out.back().text.append(frag.text, 0, lead);
+        frag.text.erase(0, lead);
+      }
+      if (!frag.text.empty()) {
+        out.push_back(std::move(frag));
+      }
+    }
+    fragments = std::move(out);
   }
 
   Element FlattenInline(Frame& frame) {
@@ -374,6 +755,7 @@ class Renderer {
     if (fragments.empty()) {
       return ftxui::text("");
     }
+    CoalesceCombiningUnits(fragments);
 
     // Rows built from fragments: a lone styled span (e.g. an inline code row)
     // must stay wrapped in its own element, otherwise becoming a direct vbox
@@ -387,11 +769,7 @@ class Renderer {
     Elements items;
     items.reserve(fragments.size());
     for (auto& frag : fragments) {
-      Element e = ftxui::text(std::move(frag.text));
-      if (frag.style) {
-        e = frag.style(std::move(e));
-      }
-      items.push_back(std::move(e));
+      items.push_back(StyledText(std::move(frag.text), frag.style));
     }
     return ftxui::hbox(std::move(items));
   }
@@ -597,7 +975,11 @@ class Renderer {
     if (text.empty()) {
       return;
     }
-    const std::string collapsed = CollapseHtmlSpace(text);
+    // Interpreted HTML text: decode complete entity references only after the
+    // markup boundaries are recognized, so decoded quotes/angle brackets can
+    // never become new syntax. Verbatim HTML never reaches here.
+    const std::string decoded = DecodeEntityText(text);
+    const std::string collapsed = CollapseHtmlSpace(decoded);
     if (collapsed.empty()) {
       return;
     }
@@ -660,7 +1042,7 @@ class Renderer {
     Frame& top = Top();
     if (IsInlineCapable(top.kind)) {
       PushSpan(InlineCodeStyle(), "code");
-      EmitInline(text);
+      EmitInline(ExpandTabs(text));
       PopSpan();
       return;
     }
@@ -880,13 +1262,20 @@ class Renderer {
         link_ws_key_.clear();
         HtmlCloseSpan("a:", true);
       } else {
-        const std::string href(HtmlAttr(attrs, "href"));
-        HtmlOpenSpan(href.empty() ? Decorator(ftxui::underlined)
-                                  : LinkStyle(href),
-                     "a:" + href);
-        // Skip formatting whitespace right after <a> (see the close branch):
-        // the first real content clears this.
-        link_ws_key_ = "a:" + href;
+        const std::string href_raw(HtmlAttr(attrs, "href"));
+        if (href_raw.empty()) {
+          HtmlOpenSpan(ftxui::underlined, "a:");
+          link_ws_key_ = "a:";
+        } else {
+          // Decode entities only after the quoted attribute boundary is known,
+          // and reject invalid/unsafe decoded destinations (keep the label).
+          const DecodedDestination href = DecodeDestination(href_raw);
+          const std::string link_key = "a:" + href.text;
+          HtmlOpenSpan(LinkStyle(href.text, !href.invalid), link_key);
+          // Skip formatting whitespace right after <a> (see the close branch):
+          // the first real content clears this.
+          link_ws_key_ = link_key;
+        }
       }
       return;
     }
@@ -896,9 +1285,11 @@ class Renderer {
         if (!IsInlineCapable(Top().kind)) {
           return;
         }
-        const std::string_view alt = HtmlAttr(attrs, "alt");
+        const std::string_view alt_raw = HtmlAttr(attrs, "alt");
+        const std::string alt =
+            alt_raw.empty() ? std::string("[img]") : DecodeEntityText(alt_raw);
         PushSpan(ftxui::dim, "img");
-        EmitInline(alt.empty() ? "[img]" : alt);
+        EmitInline(alt);
         PopSpan();
       }
       return;
@@ -934,7 +1325,7 @@ class Renderer {
           // Invalid nesting (<pre> inside running text): fall back to
           // styled inline rather than corrupting the stack.
           PushSpan(InlineCodeStyle(), "code");
-          EmitInline(raw_buf_);
+          EmitInline(ExpandTabs(raw_buf_));
           PopSpan();
         } else if (Top().kind == Kind::Html) {
           Top().text += raw_buf_;
@@ -1556,8 +1947,8 @@ class Renderer {
         break;
       case MD_SPAN_A: {
         auto* a = static_cast<MD_SPAN_A_DETAIL*>(detail);
-        const std::string href = Attr(a->href);
-        PushSpan(LinkStyle(href), "a:" + href);
+        const DecodedDestination href = DecodeMdAttribute(a->href);
+        PushSpan(LinkStyle(href.text, !href.invalid), "a:" + href.text);
         break;
       }
       case MD_SPAN_IMG:
@@ -1593,7 +1984,6 @@ class Renderer {
     const std::string_view s(reinterpret_cast<const char*>(text), size);
     switch (type) {
       case MD_TEXT_NORMAL:
-      case MD_TEXT_ENTITY:
         // Inside an HTML block plain text joins the tag stream so source
         // newlines collapse and merge like any other HTML whitespace.
         if (in_html_) {
@@ -1602,8 +1992,18 @@ class Renderer {
           EmitInline(s);
         }
         break;
+      case MD_TEXT_ENTITY:
+        // Decode exactly the references md4c typed as entities; ordinary text
+        // (including escaped literal '&amp;') is never rescanned.
+        if (in_html_) {
+          HtmlInlineText(s);
+        } else {
+          EmitInline(DecodeEntityForDisplay(s));
+        }
+        break;
       case MD_TEXT_NULLCHAR:
-        EmitInline(s);
+        // A NUL in the source is displayed as U+FFFD, never emitted live.
+        EmitInline("\xEF\xBF\xBD");
         break;
       case MD_TEXT_SOFTBR:
         if (in_html_) {
@@ -1629,7 +2029,8 @@ class Renderer {
         } else if (in_html_) {
           HtmlText(s);
         } else {
-          EmitInline(s);
+          // Inline code: expand tabs to four-column stops (display only).
+          EmitInline(ExpandTabs(s));
         }
         break;
       }
@@ -1668,6 +2069,11 @@ class Renderer {
     if (line_start < code.size() || code.empty()) {
       lines.emplace_back(code.data() + line_start, code.size() - line_start);
     }
+    // Expand tabs to four-column stops before any wrapping so a tab is not
+    // treated as a single column or stranded at a wrap edge.
+    for (auto& l : lines) {
+      l = ExpandTabs(l);
+    }
 
     auto token_text = [this](std::string s) {
       return ftxui::text(std::move(s)) | ftxui::color(theme_.code_block_fg);
@@ -1680,33 +2086,44 @@ class Renderer {
         rows.push_back(token_text(l));
         continue;
       }
-      // Wrap mode: split the raw line into word elements (same plain-prefix
-      // glue as WrapRow: inter-word whitespace rides along with the following
-      // token, leading indentation stays with the first token), then hflow
-      // reflows the row at the available width. Tokens longer than the
-      // viewport are never split mid-word; they clip.
+      // Wrap mode: split the raw line into word atoms and append the following
+      // inter-word whitespace to the *preceding* atom, so a soft wrap consumes
+      // the separator instead of charging its width against the next word.
+      // Leading indentation stays on the first atom and trailing whitespace on
+      // the last, where it clips rather than wrapping onto an extra row.
+      // Tokens longer than the viewport are never split mid-word; they clip.
       Elements toks;
-      std::string pending;
+      std::string cur;
       size_t i = 0;
       const size_t n = l.size();
       while (i < n) {
-        if (l[i] == ' ' || l[i] == '\t') {
-          size_t j = i;
-          while (j < n && (l[j] == ' ' || l[j] == '\t')) {
-            ++j;
-          }
-          pending.append(l, i, j - i);
-          i = j;
-        } else {
-          size_t j = i;
-          while (j < n && l[j] != ' ' && l[j] != '\t') {
-            ++j;
-          }
-          pending.append(l, i, j - i);
-          toks.push_back(token_text(std::move(pending)));
-          pending.clear();
-          i = j;
+        const bool space = (l[i] == ' ' || l[i] == '\t');
+        size_t j = i;
+        while (j < n && ((l[j] == ' ' || l[j] == '\t') == space)) {
+          ++j;
         }
+        if (space) {
+          cur.append(l, i, j - i);  // leading indentation or all-space line.
+          i = j;
+          continue;
+        }
+        cur.append(l, i, j - i);
+        // Attach a following whitespace run to this atom (separator or
+        // trailing spaces).
+        if (j < n && (l[j] == ' ' || l[j] == '\t')) {
+          size_t e = j;
+          while (e < n && (l[e] == ' ' || l[e] == '\t')) {
+            ++e;
+          }
+          cur.append(l, j, e - j);
+          j = e;
+        }
+        toks.push_back(token_text(std::move(cur)));
+        cur.clear();
+        i = j;
+      }
+      if (!cur.empty()) {
+        toks.push_back(token_text(std::move(cur)));  // whitespace-only line.
       }
       if (toks.empty()) {
         toks.push_back(token_text(""));
@@ -1771,8 +2188,15 @@ class Renderer {
 
   // --- Theme-styled helpers --------------------------------------------------
 
-  Decorator LinkStyle(const std::string& href) {
-    return ftxui::color(theme_.link) | ftxui::underlined | ftxui::hyperlink(href);
+  Decorator LinkStyle(const std::string& href, bool link_ok = true) {
+    // Retain the label text and link styling for unsafe destinations, but do
+    // not emit them as an OSC 8 hyperlink target: malformed UTF-8 or decoded
+    // C0/DEL/C1 controls could otherwise reach the terminal through the URL.
+    Decorator style = ftxui::color(theme_.link) | ftxui::underlined;
+    if (link_ok && IsSafeLinkDestination(href)) {
+      style = style | ftxui::hyperlink(href);
+    }
+    return style;
   }
 
   Decorator InlineCodeStyle() {

@@ -1,13 +1,16 @@
 #include <algorithm>
 #include <atomic>  // for atomic
+#include <chrono>  // for milliseconds (foreground poll interval)
+#include <condition_variable>  // for condition_variable
 #include <cstdint>  // for uint64_t
 #include <cstdlib>
+#include <filesystem>  // for is_directory
 #include <fstream>
 #include <functional>  // for function
 #include <iostream>
 #include <iterator>
 #include <memory>  // for shared_ptr, make_shared
-#include <mutex>  // for mutex
+#include <mutex>  // for mutex, recursive_mutex
 #include <optional>  // for optional
 #include <string>
 #include <thread>  // for thread
@@ -17,6 +20,7 @@
 #include <ftxui/component/app.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
+#include <ftxui/component/loop.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
 
@@ -107,14 +111,31 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  std::error_code input_error;
+  if (std::filesystem::is_directory(input_file, input_error)) {
+    std::cerr << "error: cannot read '" << input_file << "': is a directory\n";
+    return EXIT_FAILURE;
+  }
+
   std::ifstream file(input_file);
   if (!file.is_open()) {
     std::cerr << "error: cannot open '" << input_file << "'\n";
     return EXIT_FAILURE;
   }
 
-  std::string contents((std::istreambuf_iterator<char>(file)),
-                       std::istreambuf_iterator<char>());
+  std::string contents;
+  try {
+    contents.assign(std::istreambuf_iterator<char>(file),
+                    std::istreambuf_iterator<char>());
+  } catch (const std::exception& e) {
+    std::cerr << "error: cannot read '" << input_file << "': " << e.what()
+              << "\n";
+    return EXIT_FAILURE;
+  }
+  if (file.bad()) {
+    std::cerr << "error: cannot read '" << input_file << "'\n";
+    return EXIT_FAILURE;
+  }
 
   if (contents.empty()) {
     contents = "(empty file)";
@@ -207,6 +228,22 @@ int main(int argc, char** argv) {
   // immutable inputs plus the handoff below. The loop side uses try_lock
   // exclusively and at most one worker runs at a time; stale query, layout,
   // and document generations are discarded on landing.
+  // App-owned render guard: one recursive mutex covers the foreground
+  // RunOnce() step (including FTXUI's actual draw) and every offscreen
+  // screen/layout/cell-extraction transaction. Ordinary idle waits, matching,
+  // publication and worker joins stay outside it. FTXUI's own lifecycle waits
+  // and suspend/resume remain inside it as the accepted exception.
+  std::recursive_mutex render_mu;
+
+  // Worker completion notification: the worker clears its running flag and
+  // posts Event::Custom on every ending (result, stale discard, no match,
+  // invalid pattern, cancellation), then signals this predicate. The
+  // foreground polls with a bounded timeout as a fallback for keyboard input
+  // because this FTXUI API exposes no public input wait handle.
+  std::mutex completion_mu;
+  std::condition_variable completion_cv;
+  bool worker_completed = false;  // guarded by completion_mu.
+
   std::mutex search_mu;
   struct SearchResult {
     uint64_t generation = 0;
@@ -220,6 +257,7 @@ int main(int argc, char** argv) {
     std::shared_ptr<const markit::Re2Matcher> matcher;
     std::vector<int> matches;
     bool invalid = false;
+    bool error = false;  // worker failed or thread start failed.
   };
   struct SearchRowsResult {
     uint64_t document_generation = 0;
@@ -246,6 +284,7 @@ int main(int argc, char** argv) {
   std::shared_ptr<const markit::Re2Matcher> search_matcher;
   bool search_matcher_ready = false;
   bool search_invalid = false;
+  bool search_error = false;  // last adopted worker result failed.
   bool search_pending = false;
   std::vector<int> search_matches;
   int search_pos = -1;
@@ -255,6 +294,20 @@ int main(int argc, char** argv) {
   int search_requested_viewport = -1;
   bool search_requested_scroll = false;
   bool search_request_seen = false;
+
+  // One deferred Enter jump (pending-Enter option 2:A). It is keyed by the
+  // accepted query and geometry so it only fires against matching current
+  // results; a superseding query/layout or intervening navigation cancels it.
+  bool pending_jump_active = false;
+  std::string pending_jump_query;
+  bool pending_jump_case = false;
+  uint64_t pending_jump_document = 0;
+  uint64_t pending_jump_layout = 0;
+  int pending_jump_from_row = 0;
+
+  // Focus held before the search prompt opened, restored by Esc (focus option
+  // 1:B). Enter always closes the prompt and focuses the document.
+  bool pre_search_nav_focused = false;
 
   // Live-view mark for the current match (SearchHighlight overlay): the
   // target row plus its match byte spans, recomputed in
@@ -292,11 +345,9 @@ int main(int argc, char** argv) {
       cached_content =
           is_empty_placeholder ? fresh | dim : std::move(fresh);
     }
-    // Refresh here (not just in the status bar): the content renders before
-    // the status row in the same frame, so the mark must already be current.
-    // refresh_search_state is idempotent — unchanged state recomputes
-    // nothing (span lookup covers one row only).
-    refresh_search_state();
+    // Match state is prepared by the service step before this draw; the
+    // renderer only reads the already-computed row/span pointers, so no RE2
+    // work or worker join happens inside a render callback.
     if (hl_match_row >= 0 && !hl_match_spans.empty()) {
       // The highlight node stores pointers to the stable row/span state above.
       // Reusing the wrapper keeps the scroller's requirement cache valid while
@@ -361,6 +412,7 @@ int main(int argc, char** argv) {
   // located section at or before it when the heading itself has no row,
   // e.g. an empty fingerprint), clamped like any scroll.
   auto jump_to_heading = [&](int idx) {
+    pending_jump_active = false;  // heading navigation cancels a deferred jump.
     refresh_heading_map();
     int row = 0;
     for (const auto& [r, i] : hl_map) {
@@ -444,37 +496,19 @@ int main(int argc, char** argv) {
                           : markit::SearchExtractWidth(cached_content, vw, sc);
     const std::shared_ptr<const std::vector<std::string>> input_rows =
         rows_current ? search_rows : nullptr;
-    if (search_worker.joinable()) {
-      search_worker.join();  // finished flight only (never a live one).
-    }
+    // The caller reaps any finished flight before spawning, so no join here.
     search_worker_running.store(true);
-    search_worker = std::thread(
+    try {
+      search_worker = std::thread(
         [&, gen, document, layout, source, worker_theme, worker_mode, vw, sc,
          width, hint, query, case_sensitive, input_rows] {
-          std::shared_ptr<const std::vector<std::string>> rows = input_rows;
-          if (!rows) {
-            // Private tree: RenderMarkdown is a pure function of its inputs
-            // and FTXUI renders touch no shared mutable state. The empty-file
-            // dim decorator changes style only, never text, so it is skipped.
-            ftxui::Element tree =
-                markit::RenderMarkdown(*source, worker_theme, worker_mode);
-            auto extracted = std::make_shared<std::vector<std::string>>(
-                markit::RenderTextRows(tree, width, hint));
-            rows = std::move(extracted);
-          }
-
-          std::shared_ptr<const markit::Re2Matcher> matcher;
-          std::vector<int> matches;
-          bool invalid = false;
-          if (!query.empty()) {
-            matcher = std::make_shared<markit::Re2Matcher>(query,
-                                                           case_sensitive);
-            invalid = !matcher->ok();
-            if (!invalid) {
-              matches = markit::FindMatches(*rows, *matcher);
-            }
-          }
-
+          // A flight is obsolete once its generation or layout/document
+          // changes; the foreground bumps these on query/layout/shutdown.
+          auto cancelled = [&] {
+            return gen != search_gen.load() ||
+                   document != search_document_gen.load() ||
+                   layout != search_layout_gen.load();
+          };
           SearchResult result;
           result.generation = gen;
           result.document_generation = document;
@@ -483,22 +517,70 @@ int main(int argc, char** argv) {
           result.scroll = sc;
           result.query = query;
           result.case_sensitive = case_sensitive;
-          result.rows = std::move(rows);
-          result.matcher = std::move(matcher);
-          result.matches = std::move(matches);
-          result.invalid = invalid;
+          bool aborted = false;
+          try {
+            std::shared_ptr<const std::vector<std::string>> rows = input_rows;
+            if (!rows && !cancelled()) {
+              // Private tree: RenderMarkdown is a pure function of its inputs.
+              // The offscreen extraction locks the shared render guard per
+              // window (inside RenderTextRows) and honours cancellation between
+              // windows, so it neither blocks the foreground for the whole
+              // document nor runs to completion after being superseded.
+              ftxui::Element tree =
+                  markit::RenderMarkdown(*source, worker_theme, worker_mode);
+              std::vector<std::string> extracted =
+                  markit::RenderTextRows(tree, width, hint, &render_mu,
+                                         cancelled);
+              rows = std::make_shared<const std::vector<std::string>>(
+                  std::move(extracted));
+            }
+            if (cancelled()) {
+              aborted = true;  // rows (if any) may be a partial extraction.
+            } else {
+              result.rows = std::move(rows);
+              std::shared_ptr<const markit::Re2Matcher> matcher;
+              std::vector<int> matches;
+              bool invalid = false;
+              if (!query.empty()) {
+                matcher = std::make_shared<markit::Re2Matcher>(query,
+                                                               case_sensitive);
+                invalid = !matcher->ok();
+                if (!invalid) {
+                  matches = markit::FindMatches(*result.rows, *matcher,
+                                                cancelled);
+                }
+              }
+              if (cancelled()) {
+                aborted = true;  // match scan may be incomplete.
+              } else {
+                result.matcher = std::move(matcher);
+                result.matches = std::move(matches);
+                result.invalid = invalid;
+              }
+            }
+          } catch (...) {
+            // Publish an explicit failure instead of leaving the UI pending.
+            result = SearchResult{};
+            result.generation = gen;
+            result.document_generation = document;
+            result.layout_generation = layout;
+            result.viewport = vw;
+            result.scroll = sc;
+            result.query = query;
+            result.case_sensitive = case_sensitive;
+            result.error = true;
+            aborted = false;
+          }
           {
             std::lock_guard<std::mutex> lock(search_mu);
             const bool layout_current =
                 document == search_document_gen.load() &&
                 layout == search_layout_gen.load();
-            if (gen == search_gen.load() && layout_current) {
+            if (!aborted && gen == search_gen.load() && layout_current) {
               search_bg = std::move(result);
               search_result_ready = true;
-              // Wake the loop: FTXUI renders on demand, so without this the
-              // adoption and the "..." -> count flip would wait for input.
-              screen.PostEvent(Event::Custom);
-            } else if (layout_current && result.rows) {
+            } else if (!aborted && layout_current && result.rows &&
+                       !result.error) {
               // The query became stale while layout work was running. Keep
               // the immutable rows for the latest query, but never publish
               // the stale matcher or match indices.
@@ -506,12 +588,45 @@ int main(int argc, char** argv) {
                   result.document_generation, result.layout_generation,
                   result.viewport, result.scroll, std::move(result.rows)};
               search_rows_result_ready = true;
-              screen.PostEvent(Event::Custom);
             }
           }
+          // Every ending clears running and wakes the loop unconditionally so
+          // a stale/cancelled/zero-result/error job can be replaced without
+          // another keypress. Publish under the mailbox mutex first.
           search_worker_running.store(false);
+          screen.PostEvent(Event::Custom);
+          {
+            std::lock_guard<std::mutex> lock(completion_mu);
+            worker_completed = true;
+          }
+          completion_cv.notify_one();
         }
-    );
+      );
+    } catch (...) {
+      // Thread construction failed: record an explicit error result and wake
+      // the loop so the prompt does not stay pending forever.
+      search_worker_running.store(false);
+      {
+        std::lock_guard<std::mutex> lock(search_mu);
+        SearchResult result;
+        result.generation = gen;
+        result.document_generation = document;
+        result.layout_generation = layout;
+        result.viewport = vw;
+        result.scroll = sc;
+        result.query = query;
+        result.case_sensitive = case_sensitive;
+        result.error = true;
+        search_bg = std::move(result);
+        search_result_ready = true;
+      }
+      screen.PostEvent(Event::Custom);
+      {
+        std::lock_guard<std::mutex> lock(completion_mu);
+        worker_completed = true;
+      }
+      completion_cv.notify_one();
+    }
   };
 
   // Ensure a current row/match result is coming. A blank query still permits
@@ -529,7 +644,7 @@ int main(int argc, char** argv) {
         search_query.empty() ||
         (search_compiled == search_query &&
          search_case == config.search_case_sensitive &&
-         (search_invalid || search_matcher_ready));
+         (search_invalid || search_error || search_matcher_ready));
     bool result_ready = false;
     bool rows_result_ready = false;
     {
@@ -563,13 +678,9 @@ int main(int argc, char** argv) {
         search_rows_result_ready = false;
       }
     }
-    // The worker publishes before returning, so a ready handoff means only
-    // its short thread epilogue remains. Join before the UI calls RE2 on the
-    // shared immutable matcher; this also keeps dependency thread-local
-    // teardown out of the highlight path.
-    if ((result || rows_result) && search_worker.joinable()) {
-      search_worker.join();
-    }
+    // The worker publishes before returning and is reaped by the service step
+    // before adoption, so the immutable matcher is safe to use here and no
+    // join or RE2 work happens inside a render callback.
     if (rows_result &&
         rows_result->document_generation == search_document_gen.load() &&
         rows_result->layout_generation == search_layout_gen.load() &&
@@ -599,6 +710,7 @@ int main(int argc, char** argv) {
       search_matcher_ready = static_cast<bool>(search_matcher);
       search_matches = std::move(result->matches);
       search_invalid = result->invalid;
+      search_error = result->error;
       search_compiled = result->query;
       search_case = result->case_sensitive;
       search_pending = false;
@@ -616,6 +728,7 @@ int main(int argc, char** argv) {
       search_matches.clear();
       search_pos = -1;
       search_invalid = false;
+      search_error = false;
       search_pending = false;
       search_compiled.clear();
       search_case = false;
@@ -642,7 +755,14 @@ int main(int argc, char** argv) {
     const bool query_current =
         search_compiled == search_query &&
         search_case == config.search_case_sensitive &&
-        (search_invalid || search_matcher_ready);
+        (search_invalid || search_error || search_matcher_ready);
+    if (search_error) {
+      search_pending = false;
+      hl_match_row = -1;
+      hl_match_spans.clear();
+      hl_match_query.clear();
+      return;
+    }
     if (!search_rows_valid || !query_current) {
       search_pending = true;
       hl_match_row = -1;
@@ -673,21 +793,9 @@ int main(int argc, char** argv) {
     }
   };
 
-  // Full search refresh for event/status paths: adopt worker state, then
-  // schedule the current query/layout if its result is still pending.
-  auto refresh_search = [&] {
-    refresh_search_state();
-    if (!search_query.empty()) {
-      ensure_search_rows();
-    }
-  };
-
-  // Jump to the next (dir > 0) or previous (dir < 0) match, wrapping around.
-  // The first jump after a query change lands on the first match at or below
-  // (above, for dir < 0) the top of view: NextMatch is strict, so the seed
-  // is offset by one row to make the first jump inclusive.
-  auto goto_match = [&](int dir) {
-    refresh_search();
+  // Perform a match jump (no pending-intent side effects) from the current
+  // `selected`/`search_pos` state.
+  auto perform_match_jump = [&](int dir) {
     if (search_matches.empty()) {
       return;
     }
@@ -713,6 +821,72 @@ int main(int argc, char** argv) {
     log("search", before, selected);
   };
 
+  // Jump to the next (dir > 0) or previous (dir < 0) match, wrapping around.
+  // The first jump after a query change lands on the first match at or below
+  // (above, for dir < 0) the top of view: NextMatch is strict, so the seed
+  // is offset by one row to make the first jump inclusive. Any navigation
+  // cancels a deferred Enter jump.
+  auto goto_match = [&](int dir) {
+    pending_jump_active = false;
+    perform_match_jump(dir);
+  };
+
+  // Service the search worker outside every render/mailbox lock and outside
+  // the render guard: reap a finished flight, adopt its immutable result,
+  // execute at most one deferred Enter jump, then schedule the latest needed
+  // work. Called from the foreground loop between RunOnce steps.
+  auto service_search = [&] {
+    if (search_worker.joinable() && !search_worker_running.load()) {
+      search_worker.join();  // posting already stopped; never a live flight.
+    }
+    // Adopt any published result and recompute the single-row mark outside
+    // every lock and the render guard. Running this every iteration keeps the
+    // mark current after navigation, not only after a worker completion.
+    const int prev_row = hl_match_row;
+    const std::vector<std::pair<int, int>> prev_spans = hl_match_spans;
+    const bool prev_pending = search_pending;
+    const bool prev_invalid = search_invalid;
+    const bool prev_error = search_error;
+    const size_t prev_match_count = search_matches.size();
+    refresh_search_state();
+    if (pending_jump_active) {
+      const bool superseded =
+          search_query != pending_jump_query ||
+          config.search_case_sensitive != pending_jump_case ||
+          search_document_gen.load() != pending_jump_document ||
+          search_layout_gen.load() != pending_jump_layout;
+      if (superseded) {
+        pending_jump_active = false;
+      } else if (search_rows_valid && !search_pending &&
+                 search_compiled == pending_jump_query &&
+                 search_case == pending_jump_case) {
+        // Results for the accepted query/layout are adopted. Consume the
+        // intent exactly once; zero matches consume without movement.
+        const int from_row = pending_jump_from_row;
+        pending_jump_active = false;
+        if (!search_matches.empty()) {
+          selected = from_row;
+          search_pos = -1;
+          perform_match_jump(+1);
+        }
+      }
+    }
+    if (hl_match_row != prev_row || hl_match_spans != prev_spans ||
+        search_pending != prev_pending || search_invalid != prev_invalid ||
+        search_error != prev_error ||
+        search_matches.size() != prev_match_count) {
+      // The mark or the status changed without an input event (navigation,
+      // deferred jump, or worker adoption): ask for one more draw so neither
+      // is left stale, including the "..." -> count/"search error" flip.
+      screen.PostEvent(Event::Custom);
+    }
+    // Only run worker work when a search is active: an idle viewer must not
+    // prewarm an expensive whole-document extraction.
+    if (search_open || !search_query.empty()) {
+      ensure_search_rows();
+    }
+  };
+
   auto status_bar = Renderer([&] {
     const int max_offset = std::max(0, content_height - viewport_height);
     const int current = std::clamp(selected, 0, max_offset);
@@ -721,10 +895,12 @@ int main(int argc, char** argv) {
       // Persistent match counter: visible while typing and while navigating
       // with n/N after the prompt closed. `/` clears the query (fresh
       // search), which hides the counter again. "..." while the worker rows
-      // are still on their way.
-      refresh_search();
+      // are still on their way. State is prepared by the service step; the
+      // renderer never adopts or schedules work.
       if (search_pending) {
         search_suffix = "...";
+      } else if (search_error) {
+        search_suffix = "search error";
       } else {
         search_suffix = markit::FormatSearchStatus(
             search_pos, static_cast<int>(search_matches.size()),
@@ -798,15 +974,65 @@ int main(int argc, char** argv) {
       debug.flush();
     }
 
-    if (search_open && markit::MatchesKey(event, kb.search_cancel)) {
-      // Esc closes the prompt first (before the global quit below). The
-      // query and matches are retained so n/N keep navigating; focus goes
-      // back to the content. `/` starts fresh.
-      search_open = false;
-      scroller->TakeFocus();
+    // Universal Ctrl+C: it must not be consumed by the prompt as query input
+    // or downgraded to a search-only cancel. App's forced Ctrl+C handling
+    // records SIGINT even though this returns true, so the terminal is
+    // restored and the interrupt is re-raised after teardown.
+    if (event == Event::CtrlC) {
+      pending_jump_active = false;
+      screen.Exit();
       return true;
     }
+
+    // An open prompt owns every other key before global/nav shortcuts, so
+    // q, w, n, slash and navigation letters become query input.
+    if (search_open) {
+      if (markit::MatchesKey(event, kb.search_cancel)) {
+        // Esc restores the focus held before the prompt opened (1:B). The
+        // query and matches are retained so n/N keep navigating.
+        search_open = false;
+        nav_focused =
+            pre_search_nav_focused && nav_visible && !headings.empty();
+        if (nav_focused) {
+          const int current = current_heading();
+          nav_cursor = current >= 0 ? current : 0;
+          nav_offset = markit::FollowNavOffset(
+              nav_offset, nav_cursor, static_cast<int>(headings.size()),
+              nav_window_height());
+        } else {
+          scroller->TakeFocus();
+        }
+        return true;
+      }
+      if (markit::MatchesKey(event, kb.search_accept)) {
+        // Enter closes the prompt and focuses the document now. If the
+        // accepted query's results are not ready, retain exactly one jump
+        // against this query and geometry (pending-Enter option 2:A).
+        search_open = false;
+        nav_focused = false;
+        scroller->TakeFocus();
+        const std::string accepted = search_query;
+        const bool accepted_case = config.search_case_sensitive;
+        const bool ready =
+            !accepted.empty() && search_rows_valid && !search_pending &&
+            search_compiled == accepted && search_case == accepted_case;
+        if (ready) {
+          perform_match_jump(+1);
+        } else if (!accepted.empty()) {
+          pending_jump_active = true;
+          pending_jump_query = accepted;
+          pending_jump_case = accepted_case;
+          pending_jump_document = search_document_gen.load();
+          pending_jump_layout = search_layout_gen.load();
+          pending_jump_from_row = selected;
+        }
+        return true;
+      }
+      return false;  // everything else is query text.
+    }
+
     if (markit::MatchesKey(event, kb.quit)) {
+      pending_jump_active = false;
       screen.Exit();
       return true;
     }
@@ -874,18 +1100,17 @@ int main(int argc, char** argv) {
         return true;
       }
     }
-    if (search_open) {
-      // While the prompt is open, Enter accepts the query: jump to the next
-      // match and close the prompt (n/N keep navigating from there).
-      // Esc cancels without jumping. Every other key (including n/N and /)
-      // falls through to the Input as text.
-      if (markit::MatchesKey(event, kb.search_accept)) {
-        goto_match(+1);
-        search_open = false;
-        scroller->TakeFocus();
-        return true;
-      }
-      return false;
+    // Any intervening navigation cancels a deferred Enter jump, including
+    // boundary no-ops and horizontal panning.
+    if (markit::MatchesKey(event, kb.scroll_up) ||
+        markit::MatchesKey(event, kb.scroll_down) ||
+        markit::MatchesKey(event, kb.page_up) ||
+        markit::MatchesKey(event, kb.page_down) ||
+        markit::MatchesKey(event, kb.goto_top) ||
+        markit::MatchesKey(event, kb.goto_bottom) ||
+        markit::MatchesKey(event, kb.pan_left) ||
+        markit::MatchesKey(event, kb.pan_right)) {
+      pending_jump_active = false;
     }
     if (markit::MatchesKey(event, kb.search_next)) {
       goto_match(+1);  // no-op without an active search.
@@ -896,14 +1121,16 @@ int main(int argc, char** argv) {
       return true;
     }
     if (markit::MatchesKey(event, kb.search_open)) {
+      // Remember the focus to restore on Esc (1:B); the prompt owns input
+      // until it closes. The service step pre-warms the current rows.
+      pending_jump_active = false;
+      pre_search_nav_focused = nav_focused;
+      nav_focused = false;
       search_open = true;
       search_query.clear();
       search_matches.clear();
       search_pos = -1;
       search_input->TakeFocus();
-      // Pre-warm the rows for the current tree on the worker: the first
-      // keystroke then scans instead of extracting.
-      ensure_search_rows();
       return true;
     }
     if (markit::MatchesKey(event, kb.toggle_wrap)) {
@@ -948,9 +1175,48 @@ int main(int argc, char** argv) {
     return false;
   });
 
-  screen.Loop(component);
+  // App-owned loop: one recursive render guard covers Loop construction/
+  // destruction (terminal install/uninstall), each foreground RunOnce step,
+  // and the worker's offscreen render. Ordinary waits, servicing, matching
+  // and joins stay outside the guard.
+  screen.ForceHandleCtrlC(true);
+
+  std::unique_ptr<Loop> loop;
+  {
+    std::lock_guard<std::recursive_mutex> guard(render_mu);
+    loop = std::make_unique<Loop>(&screen, component);
+  }
+
+  while (!loop->HasQuitted()) {
+    // Adopt/reap/start worker work outside every lock and the render guard.
+    service_search();
+    {
+      std::lock_guard<std::recursive_mutex> guard(render_mu);
+      loop->RunOnce();
+    }
+    if (loop->HasQuitted()) {
+      break;
+    }
+    // Bounded foreground poll: a worker completion shortens the wait, and the
+    // timed fallback polls keyboard input and deferred signals because this
+    // FTXUI API exposes no public input wait handle.
+    std::unique_lock<std::mutex> lock(completion_mu);
+    completion_cv.wait_for(lock, std::chrono::milliseconds(8),
+                           [&] { return worker_completed; });
+    worker_completed = false;
+  }
+
+  // Shutdown: invalidate wanted work, join the worker outside all guards,
+  // then destroy Loop under the guard while App and captured state stay alive
+  // so terminal restoration runs before SIGINT is re-raised.
+  search_gen.fetch_add(1);
+  pending_jump_active = false;
   if (search_worker.joinable()) {
-    search_worker.join();  // reap the extraction worker, if still flying.
+    search_worker.join();
+  }
+  {
+    std::lock_guard<std::recursive_mutex> guard(render_mu);
+    loop.reset();  // ~Loop -> PostMain -> Uninstall.
   }
   return EXIT_SUCCESS;
 }

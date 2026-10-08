@@ -7,6 +7,7 @@
 #ifndef MARKIT_SEARCH_HPP
 #define MARKIT_SEARCH_HPP
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -51,9 +52,12 @@ class Re2Matcher : public Matcher {
 };
 
 // Row indices (into `rows`) containing at least one match, ascending.
-// An invalid matcher matches nothing.
+// An invalid matcher matches nothing. When `cancelled` is set and returns true
+// the scan stops early and returns the matches found so far (callers must treat
+// a cancelled scan as incomplete, not as a complete result).
 std::vector<int> FindMatches(const std::vector<std::string>& rows,
-                             const Matcher& matcher);
+                             const Matcher& matcher,
+                             const std::function<bool()>& cancelled = {});
 
 // Next match row strictly after `from` (dir > 0) or strictly before `from`
 // (dir < 0), wrapping around. Strictness means repeated "next" advances off
