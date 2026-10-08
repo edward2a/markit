@@ -33,7 +33,7 @@ import termios
 import time
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BINARY = os.path.join(HOME, "build", "markit")
+BINARY = os.environ.get("MARKIT_BINARY", os.path.join(HOME, "build", "markit"))
 
 
 def set_winsize(fd, cols, rows):
