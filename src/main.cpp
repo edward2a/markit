@@ -195,6 +195,13 @@ int main(int argc, char** argv) {
   int content_snapshot_width = -1;
   bool content_snapshot_scroll = false;
   uint64_t content_snapshot_document = 0;
+  // Deferred display-mode toggle: the pre-toggle snapshot and offset are
+  // stashed here and mapped against the adopted new-mode snapshot (the toggle
+  // no longer builds on the foreground).
+  bool toggle_map_active = false;
+  std::shared_ptr<markit::LayoutSnapshot> toggle_from_snapshot;
+  int toggle_from_selected = 0;
+  bool toggle_from_scroll = false;
 
   // Building the content tree re-parses the whole document, so cache it and
   // rebuild only when the display mode changes. The viewport size is
@@ -757,6 +764,15 @@ int main(int argc, char** argv) {
     content_snapshot_width = content_snapshot->width();
     content_snapshot_scroll = scroll;
     content_snapshot_document = document;
+    if (toggle_map_active) {
+      // First adopted layout after a mode toggle: map the stashed offset into
+      // the new mode's complete snapshot.
+      selected = markit::MapTogglePosition(
+          *toggle_from_snapshot, *content_snapshot, toggle_from_selected,
+          viewport_height, toggle_from_scroll, nullptr);
+      toggle_map_active = false;
+      toggle_from_snapshot.reset();
+    }
     const int max_offset =
         std::max(0, content_snapshot->height() - viewport_height);
     selected = std::clamp(selected, 0, max_offset);
@@ -1252,47 +1268,29 @@ int main(int argc, char** argv) {
     }
     if (markit::MatchesKey(event, kb.toggle_wrap)) {
       const bool old_is_scroll = hscroll;
-      // Ensure the old snapshot is captured at the old mode's mapping width:
-      // wrap uses the viewport width, scroll uses the natural width so the
-      // anchor row text is complete (no clipping ambiguity).
-      if (old_is_scroll) {
-        const int old_width =
-            markit::SearchExtractWidth(cached_content, viewport_width, true);
-        content_snapshot->Build(cached_content, old_width);
-        content_snapshot_width = old_width;
-      } else if (content_snapshot_width != viewport_width) {
-        content_snapshot->Build(cached_content, viewport_width);
-        content_snapshot_width = viewport_width;
+      // Stash the pre-toggle snapshot and offset; the worker prepares the new
+      // mode's layout and the offset is mapped when it is adopted.
+      if (!toggle_map_active && content_snapshot &&
+          content_snapshot->height() > 0) {
+        toggle_from_snapshot = content_snapshot;
+        toggle_from_selected = selected;
+        toggle_from_scroll = old_is_scroll;
+        toggle_map_active = true;
       }
-
       hscroll = !hscroll;
       search_document_gen.fetch_add(1);
       content_cfg.horizontal_wrap =
           hscroll ? markit::WrapMode::Scroll : markit::WrapMode::Wrap;
       selected_x = 0;  // re-anchor horizontally on mode switch.
-
-      // Build the new tree against a fresh snapshot so the old snapshot stays
-      // valid for the offset mapping, then map the offset between the two
-      // complete snapshots (no 65,536-row cap).
-      auto next_snapshot = std::make_shared<markit::LayoutSnapshot>();
-      Element fresh = markit::RenderMarkdownRecording(
-          contents, content_cfg.theme, content_cfg.horizontal_wrap,
-          *next_snapshot);
-      fresh = is_empty_placeholder ? fresh | dim : std::move(fresh);
-      const int new_width =
-          hscroll ? markit::SearchExtractWidth(fresh, viewport_width, true)
-                  : viewport_width;
-      next_snapshot->Build(fresh, new_width);
-
-      selected = markit::MapTogglePosition(*content_snapshot, *next_snapshot,
-                                           selected, viewport_height,
-                                           old_is_scroll, nullptr);
-      content_snapshot = std::move(next_snapshot);
-      cached_content = std::move(fresh);
-      content_snapshot_width = new_width;
+      // Drop the old-mode tree and force a pending shell until the worker
+      // adopts the new mode's layout (the old tree must not render in the
+      // new mode). A fresh empty snapshot makes ensure_layout request work.
+      cached_content.reset();
+      content_snapshot = std::make_shared<markit::LayoutSnapshot>();
+      content_snapshot_width = -1;
       content_snapshot_scroll = hscroll;
-      content_snapshot_document = search_document_gen.load();
-      wrap_height = hscroll ? -1 : content_snapshot->height();
+      content_snapshot_document = 0;
+      wrap_height = -1;
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
