@@ -87,8 +87,11 @@ class LayoutSnapshot {
   std::vector<std::string> Rows(int first, int last) const;
 
   // Sparse text for every content row, trimmed to the last row that carries a
-  // non-space glyph. This mirrors the reference RenderTextRows output, which
-  // is the displayed-text row set search matches against.
+  // non-space glyph. This is the displayed-text row set search matches against
+  // and equals the reference RenderTextRows output for text, borders and
+  // rules. A row that is non-blank only because of a background fill (no
+  // glyph) is trimmed here but kept by the reference; that cannot change
+  // matches, since such a row has no characters to match.
   std::vector<std::string> TextRows() const;
 
   // Build-time hook used by SnapshotText; not for general use.

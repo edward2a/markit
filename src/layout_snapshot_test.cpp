@@ -315,6 +315,47 @@ TEST(LayoutSnapshot, MarkdownScrollParityWithExtraction) {
   ExpectMarkdownParity(kRichDocument(), markit::WrapMode::Scroll, 40);
 }
 
+// TextRows() is the exact row set search matches against; it must equal the
+// reference extraction (trimmed to the last non-blank row) for real Markdown.
+void ExpectTextRowsParity(const std::string& markdown, markit::WrapMode mode,
+                          int width) {
+  const markit::Theme theme;
+  ftxui::Element reference = markit::RenderMarkdown(markdown, theme, mode);
+  const int effective =
+      mode == markit::WrapMode::Scroll
+          ? markit::SearchExtractWidth(reference, width, /*is_scroll=*/true)
+          : width;
+  markit::LayoutSnapshot snapshot;
+  markit::BuildMarkdownSnapshot(markdown, theme, mode, effective, snapshot);
+  const std::vector<std::string> expected =
+      markit::RenderTextRows(reference, effective, snapshot.height());
+  EXPECT_EQ(snapshot.TextRows(), expected);
+}
+
+TEST(LayoutSnapshot, TextRowsMatchReference) {
+  ExpectTextRowsParity(kRichDocument(), markit::WrapMode::Wrap, 40);
+  ExpectTextRowsParity(kRichDocument(), markit::WrapMode::Scroll, 80);
+  ExpectTextRowsParity("trailing code block\n\n```\nlast code line\n```\n",
+                       markit::WrapMode::Wrap, 30);
+  ExpectTextRowsParity("para\n\n```\n\n\n```\n", markit::WrapMode::Wrap, 30);
+}
+
+// TextRows() has no height cap: a tall code block keeps every row.
+TEST(LayoutSnapshot, TextRowsBeyondRenderCap) {
+  const markit::Theme theme;
+  std::string md = "```\n";
+  for (int i = 0; i < 70000; ++i) {
+    md += "x\n";
+  }
+  md += "```\n";
+  markit::LayoutSnapshot snapshot;
+  markit::BuildMarkdownSnapshot(md, theme, markit::WrapMode::Wrap, 20, snapshot);
+  const std::vector<std::string> rows = snapshot.TextRows();
+  EXPECT_GT(rows.size(), 65536u);
+  ASSERT_GE(rows.size(), 2u);
+  EXPECT_NE(rows[rows.size() - 2].find("x"), std::string::npos);
+}
+
 std::string RenderToText(const ftxui::Element& element, int width, int height) {
   ftxui::Screen screen = ftxui::Screen::Create(
       ftxui::Dimension::Fixed(width), ftxui::Dimension::Fixed(height));

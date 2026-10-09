@@ -1,11 +1,11 @@
 // Section-scoped content anchor for the scroll/wrap mode toggle.
 //
-// When the user presses `w`, the content tree is rebuilt for the other mode
-// and row numbers change meaning (scroll counts unwrapped rows, wrap counts
-// reflowed visual rows), so the raw `selected` offset cannot be carried over.
-// Instead the top-of-view row is fingerprinted (first words of its normalized
-// text) inside its heading-delimited section, and the fingerprint is
-// re-located in the new layout's corresponding section.
+// The app drives heading navigation and the scroll/wrap toggle from immutable
+// LayoutSnapshot spans and rows (see the snapshot overloads below). The
+// element-based `LocateHeadingRows`, `MapTogglePosition` and `RenderTextRows`
+// below are the screen-rendering reference implementation, retained as a test
+// oracle that the snapshot paths are checked against; they are not on the
+// application path and carry the legacy 65,536-row cap.
 #ifndef MARKIT_ANCHOR_HPP
 #define MARKIT_ANCHOR_HPP
 

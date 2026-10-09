@@ -180,11 +180,10 @@ int main(int argc, char** argv) {
   // Matches/match cursor live in the search cache below.
   bool search_open = false;
   std::string search_query;
-  // Pre-measured wrap height from the toggle path: the anchor already renders
-  // the new tree at the viewport width, so the scroller can adopt the height
-  // instead of measuring again. Width -1 disables.
-  int wrap_hint_w = -1;
-  int wrap_hint_h = -1;
+  // Wrap-mode content height for the current viewport width, supplied by the
+  // document layout snapshot below and consumed by the scroller. -1 disables
+  // the override (scroll mode / content that does not reflow).
+  int wrap_height = -1;
   // Immutable layout snapshot of `cached_content` at the current width. It is
   // the authoritative wrap-mode content height, complete beyond the old
   // 65,536-row measurement cap, and the source of structural heading spans.
@@ -364,8 +363,9 @@ int main(int argc, char** argv) {
       content_snapshot_width = viewport_width;
     }
     if (!hscroll) {
-      wrap_hint_w = viewport_width;
-      wrap_hint_h = content_snapshot->height();
+      wrap_height = content_snapshot->height();
+    } else {
+      wrap_height = -1;
     }
     // Match state is prepared by the service step before this draw; the
     // renderer only reads the already-computed row/span pointers, so no RE2
@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
       Scroller(std::move(content), &selected, &viewport_height,
                [&](int before, int after) { log("scroll", before, after); },
                &selected_x, &viewport_width, &hscroll, &content_height,
-               &wrap_hint_w, &wrap_hint_h, &config.keybindings);
+               &wrap_height, &config.keybindings);
 
   auto clamp_selected = [&] {
     const int max_offset = std::max(0, content_height - viewport_height);
@@ -1194,12 +1194,7 @@ int main(int argc, char** argv) {
       cached_content = std::move(fresh);
       rendered_mode = content_cfg.horizontal_wrap;
       content_snapshot_width = new_width;
-      if (!hscroll) {
-        wrap_hint_w = viewport_width;
-        wrap_hint_h = content_snapshot->height();
-      } else {
-        wrap_hint_w = -1;
-      }
+      wrap_height = hscroll ? -1 : content_snapshot->height();
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
     }
