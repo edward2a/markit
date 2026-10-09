@@ -538,6 +538,7 @@ int main(int argc, char** argv) {
           result.query = query;
           result.case_sensitive = case_sensitive;
           bool aborted = false;
+          bool layout_failed = false;
           try {
             std::shared_ptr<const std::vector<std::string>> rows = input_rows;
             if (!rows && !cancelled()) {
@@ -551,13 +552,17 @@ int main(int argc, char** argv) {
               markit::BuildMarkdownSnapshot(*source, worker_theme, worker_mode,
                                             width, snapshot, cancelled,
                                             &aborted_build);
-              if (!aborted_build && !cancelled()) {
+              if (snapshot.failed()) {
+                layout_failed = true;  // checked limit exceeded; report error.
+              } else if (!aborted_build && !cancelled()) {
                 rows = std::make_shared<const std::vector<std::string>>(
                     snapshot.TextRows());
               }
             }
             if (cancelled()) {
               aborted = true;  // rows (if any) may be a partial extraction.
+            } else if (layout_failed) {
+              result.error = true;
             } else {
               result.rows = std::move(rows);
               std::shared_ptr<const markit::Re2Matcher> matcher;

@@ -196,12 +196,14 @@ ftxui::Element SnapshotHeading(LayoutSnapshot* snapshot, int ordinal,
 void LayoutSnapshot::Build(ftxui::Element element, int width,
                            const std::function<bool()>& cancelled) {
   runs_.clear();
-  row_runs_.clear();
+  row_offsets_.clear();
+  row_indices_.clear();
   heading_spans_.clear();
   width_ = std::max(0, width);
   height_ = 0;
   layout_passes_ = 0;
   cancelled_ = false;
+  failed_ = false;
   if (!element) {
     return;
   }
@@ -219,6 +221,12 @@ void LayoutSnapshot::Build(ftxui::Element element, int width,
     heading_spans_.clear();
     element->ComputeRequirement();
     const int h = std::max(1, element->requirement().min_y);
+    if (h > kMaxRows) {
+      // Checked limit: fail explicitly rather than overflow the row index.
+      failed_ = true;
+      height_ = 0;
+      break;
+    }
     height_ = h;
     ftxui::Box box;
     box.x_min = 0;
@@ -234,18 +242,42 @@ void LayoutSnapshot::Build(ftxui::Element element, int width,
   } while (status.need_iteration && iterations < 20);
   recording_ = false;
 
-  row_runs_.resize(static_cast<size_t>(std::max(0, height_)));
-  for (size_t i = 0; i < runs_.size(); ++i) {
-    const int row = runs_[i].row;
-    if (row >= 0 && row < height_) {
-      row_runs_[static_cast<size_t>(row)].push_back(static_cast<int>(i));
+  if (failed_) {
+    runs_.clear();
+    row_offsets_.clear();
+    row_indices_.clear();
+    return;
+  }
+
+  // Build the compact CSR row index: count runs per row, prefix-sum into
+  // offsets, then place each run and sort its row slice by column.
+  const int rows = std::max(0, height_);
+  row_offsets_.assign(static_cast<size_t>(rows) + 1, 0);
+  for (const SnapshotRun& run : runs_) {
+    if (run.row >= 0 && run.row < rows) {
+      ++row_offsets_[static_cast<size_t>(run.row) + 1];
     }
   }
-  for (std::vector<int>& row : row_runs_) {
-    std::sort(row.begin(), row.end(), [&](int a, int b) {
-      return runs_[static_cast<size_t>(a)].col <
-             runs_[static_cast<size_t>(b)].col;
-    });
+  for (int r = 0; r < rows; ++r) {
+    row_offsets_[static_cast<size_t>(r) + 1] +=
+        row_offsets_[static_cast<size_t>(r)];
+  }
+  row_indices_.resize(runs_.size());
+  std::vector<int> cursor(row_offsets_.begin(), row_offsets_.end() - 1);
+  for (size_t i = 0; i < runs_.size(); ++i) {
+    const int row = runs_[i].row;
+    if (row >= 0 && row < rows) {
+      row_indices_[static_cast<size_t>(cursor[static_cast<size_t>(row)]++)] =
+          static_cast<int>(i);
+    }
+  }
+  for (int r = 0; r < rows; ++r) {
+    std::sort(row_indices_.begin() + row_offsets_[static_cast<size_t>(r)],
+              row_indices_.begin() + row_offsets_[static_cast<size_t>(r) + 1],
+              [&](int a, int b) {
+                return runs_[static_cast<size_t>(a)].col <
+                       runs_[static_cast<size_t>(b)].col;
+              });
   }
 }
 
@@ -261,13 +293,25 @@ void LayoutSnapshot::AddHeadingSpan(int ordinal, int first_row, int last_row) {
   heading_spans_[static_cast<size_t>(ordinal)] = {first_row, last_row};
 }
 
+std::size_t LayoutSnapshot::memory_bytes() const {
+  std::size_t bytes = runs_.capacity() * sizeof(SnapshotRun);
+  for (const SnapshotRun& run : runs_) {
+    bytes += run.text.capacity();
+  }
+  bytes += row_offsets_.capacity() * sizeof(int);
+  bytes += row_indices_.capacity() * sizeof(int);
+  bytes += heading_spans_.capacity() * sizeof(std::pair<int, int>);
+  return bytes;
+}
+
 std::string LayoutSnapshot::RowText(int row) const {
   if (row < 0 || row >= height_ || width_ <= 0) {
     return {};
   }
   std::vector<std::string> cells(static_cast<size_t>(width_), " ");
-  for (const int index : row_runs_[static_cast<size_t>(row)]) {
-    const SnapshotRun& run = runs_[static_cast<size_t>(index)];
+  for (int k = row_offsets_[static_cast<size_t>(row)];
+       k < row_offsets_[static_cast<size_t>(row) + 1]; ++k) {
+    const SnapshotRun& run = runs_[static_cast<size_t>(row_indices_[k])];
     int col = run.col;
     for (const std::string& glyph : ftxui::Utf8ToGlyphs(run.text)) {
       if (col >= 0 && col < width_) {
@@ -289,8 +333,9 @@ std::string LayoutSnapshot::RowSparseText(int row) const {
     return {};
   }
   std::string out;
-  for (const int index : row_runs_[static_cast<size_t>(row)]) {
-    out += runs_[static_cast<size_t>(index)].text;
+  for (int k = row_offsets_[static_cast<size_t>(row)];
+       k < row_offsets_[static_cast<size_t>(row) + 1]; ++k) {
+    out += runs_[static_cast<size_t>(row_indices_[k])].text;
   }
   return out;
 }

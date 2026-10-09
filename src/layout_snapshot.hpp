@@ -71,6 +71,14 @@ class LayoutSnapshot {
   const std::vector<SnapshotRun>& runs() const { return runs_; }
   bool cancelled() const { return cancelled_; }
 
+  // True when a checked limit was exceeded during Build; the snapshot is
+  // incomplete and must not be used (callers report an explicit error).
+  bool failed() const { return failed_; }
+
+  // Approximate bytes retained by the snapshot (run text, run array, row index
+  // and heading spans). Diagnostic; for cache-budget accounting.
+  std::size_t memory_bytes() const;
+
   // Heading content-row spans, indexed by markdown heading occurrence ordinal:
   // entry i is {first_row, last_row} (inclusive). Empty when the tree was not
   // built by a snapshot-recording renderer.
@@ -104,14 +112,23 @@ class LayoutSnapshot {
   void AddRun(const SnapshotRun& run);
   void AddHeadingSpan(int ordinal, int first_row, int last_row);
 
+  // Checked row-count limit; a document taller than this fails the build
+  // instead of overflowing the row index.
+  static constexpr int kMaxRows = 100'000'000;
+
  private:
   int width_ = 0;
   int height_ = 0;
   int layout_passes_ = 0;
   bool recording_ = false;
   bool cancelled_ = false;
+  bool failed_ = false;
   std::vector<SnapshotRun> runs_;
-  std::vector<std::vector<int>> row_runs_;  // row -> indices into runs_
+  // Compact CSR row index: row r owns row_indices_[row_offsets_[r] ..
+  // row_offsets_[r + 1]), sorted by column. row_offsets_ has height_ + 1
+  // entries, so the index costs O(height) ints and O(runs) ints.
+  std::vector<int> row_offsets_;
+  std::vector<int> row_indices_;
   std::vector<std::pair<int, int>> heading_spans_;
 };
 

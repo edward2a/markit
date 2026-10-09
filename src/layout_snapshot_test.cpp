@@ -387,6 +387,23 @@ TEST(LayoutSnapshot, LayoutBuildCancellation) {
   EXPECT_EQ(snapshot.height(), 0);
 }
 
+// The row index is compact CSR: a tall single-run-per-row document keeps its
+// index and run storage linear and bounded, and reports no failure.
+TEST(LayoutSnapshot, RowIndexMemoryIsCompact) {
+  constexpr int kRows = 200000;
+  markit::LayoutSnapshot snapshot;
+  ftxui::Elements lines;
+  lines.reserve(kRows);
+  for (int i = 0; i < kRows; ++i) {
+    lines.push_back(markit::SnapshotText(&snapshot, "x"));
+  }
+  snapshot.Build(ftxui::vbox(std::move(lines)), 8);
+  EXPECT_EQ(snapshot.height(), kRows);
+  EXPECT_FALSE(snapshot.failed());
+  EXPECT_FALSE(snapshot.cancelled());
+  EXPECT_LT(snapshot.memory_bytes(), static_cast<std::size_t>(kRows) * 96);
+}
+
 std::string RenderToText(const ftxui::Element& element, int width, int height) {
   ftxui::Screen screen = ftxui::Screen::Create(
       ftxui::Dimension::Fixed(width), ftxui::Dimension::Fixed(height));
