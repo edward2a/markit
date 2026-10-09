@@ -214,6 +214,7 @@ add_library(markit_core STATIC
   src/config.cpp
   src/search.cpp
   src/entity_decode.cpp
+  src/layout_snapshot.cpp
 )
 target_include_directories(markit_core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -231,7 +232,8 @@ target_link_libraries(markit_core
 
 if (MARKIT_BUILD_PUBLIC_HEADER_CHECKS)
   set(_markit_public_headers
-      config display keybindings theme markdown chrome scroller anchor search)
+      config display keybindings theme markdown chrome scroller anchor search
+      layout_snapshot)
   foreach (_markit_header IN LISTS _markit_public_headers)
     set(_markit_header_source
         "${CMAKE_CURRENT_BINARY_DIR}/markit_header_${_markit_header}.cpp")
@@ -285,6 +287,7 @@ if (MARKIT_BUILD_TESTS)
       src/config_test.cpp
       src/search_test.cpp
       src/entity_decode_test.cpp
+      src/layout_snapshot_test.cpp
     )
     target_link_libraries(markit-tests
       PRIVATE markit_core
