@@ -419,4 +419,50 @@ TEST(LayoutSnapshot, HeadingSpanBeyondRenderCap) {
   EXPECT_GT(located[0].first, 65536);
 }
 
+// The snapshot-based toggle mapping must agree with the fingerprint reference
+// for a normal document, in both directions.
+void ExpectToggleParity(const std::string& md, bool old_is_scroll, int width,
+                        int viewport_height) {
+  const markit::Theme theme;
+  const std::vector<markit::Heading> headings = markit::ExtractHeadings(md);
+  const markit::HeadingFingerprints fp =
+      markit::BuildHeadingFingerprints(headings);
+  const markit::WrapMode old_mode =
+      old_is_scroll ? markit::WrapMode::Scroll : markit::WrapMode::Wrap;
+  const markit::WrapMode new_mode =
+      old_is_scroll ? markit::WrapMode::Wrap : markit::WrapMode::Scroll;
+
+  ftxui::Element old_tree = markit::RenderMarkdown(md, theme, old_mode);
+  ftxui::Element new_tree = markit::RenderMarkdown(md, theme, new_mode);
+  const int old_width =
+      old_is_scroll ? markit::SearchExtractWidth(old_tree, width, true) : width;
+  const int new_width =
+      old_is_scroll ? width : markit::SearchExtractWidth(new_tree, width, true);
+
+  markit::LayoutSnapshot old_snap;
+  markit::LayoutSnapshot new_snap;
+  markit::BuildMarkdownSnapshot(md, theme, old_mode, old_width, old_snap);
+  markit::BuildMarkdownSnapshot(md, theme, new_mode, new_width, new_snap);
+
+  for (int selected : {0, 1, 5, 10, 20, 40}) {
+    int ref_h = 0;
+    int got_h = 0;
+    const int ref = markit::MapTogglePosition(
+        old_tree, new_tree, selected, width, viewport_height, old_is_scroll, fp,
+        &ref_h);
+    const int got = markit::MapTogglePosition(old_snap, new_snap, selected,
+                                              viewport_height, old_is_scroll,
+                                              &got_h);
+    EXPECT_EQ(got, ref) << "selected " << selected
+                        << " old_is_scroll " << old_is_scroll;
+    EXPECT_EQ(got_h, ref_h) << "height selected " << selected;
+  }
+}
+
+TEST(LayoutSnapshot, ToggleMappingMatchesReference) {
+  ExpectToggleParity(kRichDocument(), /*old_is_scroll=*/false, 40, 10);
+  ExpectToggleParity(kRichDocument(), /*old_is_scroll=*/true, 40, 10);
+  ExpectToggleParity(kRichDocument(), /*old_is_scroll=*/false, 24, 8);
+}
+
 

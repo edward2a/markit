@@ -103,6 +103,15 @@ int MapTogglePosition(const ftxui::Element& old_tree,
                       const HeadingFingerprints& fingerprints,
                       int* new_height_out = nullptr);
 
+// Snapshot overload: maps the offset between two display modes using the
+// complete row sets and structural heading spans held by the snapshots, with
+// no 65,536-row cap. Build a scroll snapshot at its natural width (full text)
+// and a wrap snapshot at the viewport width.
+int MapTogglePosition(const LayoutSnapshot& old_snapshot,
+                      const LayoutSnapshot& new_snapshot, int old_selected,
+                      int viewport_height, bool old_is_scroll,
+                      int* new_height_out = nullptr);
+
 }  // namespace markit
 
 #endif  // MARKIT_ANCHOR_HPP

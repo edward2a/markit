@@ -376,6 +376,43 @@ int Proportional(int old_selected, int old_max, int new_max) {
   return std::clamp(static_cast<int>(std::llround(est)), 0, new_max);
 }
 
+// Row set from a snapshot for anchor/toggle matching: normalized row text
+// through the last non-space row. A snapshot built at a scroll tree's natural
+// width already holds full (unclipped) text; a wrap snapshot holds the wrapped
+// rows, so no separate widen pass is needed.
+std::vector<Row> SnapshotRows(const LayoutSnapshot& snapshot) {
+  std::vector<Row> rows;
+  rows.reserve(static_cast<size_t>(std::max(0, snapshot.height())));
+  int last = -1;
+  for (int r = 0; r < snapshot.height(); ++r) {
+    std::string text = Normalize(snapshot.RowText(r));
+    bool has_text = false;
+    for (char c : text) {
+      if (c != ' ') {
+        has_text = true;
+        break;
+      }
+    }
+    if (has_text) {
+      last = r;
+    }
+    rows.push_back(Row{std::move(text), false, false});
+  }
+  rows.resize(static_cast<size_t>(last + 1));
+  return rows;
+}
+
+// Heading boundary rows from structural spans, in document order.
+std::vector<int> BoundsFromSpans(const LayoutSnapshot& snapshot) {
+  std::vector<int> bounds;
+  for (const auto& [first, last] : snapshot.heading_spans()) {
+    if (first >= 0 && last >= first) {
+      bounds.push_back(first);
+    }
+  }
+  return bounds;
+}
+
 int ClampMax(const std::vector<Row>& rows, int viewport_height) {
   return std::max(0, static_cast<int>(rows.size()) - viewport_height);
 }
@@ -630,6 +667,46 @@ int MapTogglePosition(const ftxui::Element& old_tree,
   return MapTogglePosition(old_tree, new_tree, old_selected, viewport_width,
                            viewport_height, old_is_scroll,
                            BuildHeadingFingerprints(headings), new_height_out);
+}
+
+int MapTogglePosition(const LayoutSnapshot& old_snapshot,
+                      const LayoutSnapshot& new_snapshot, int old_selected,
+                      int viewport_height, bool old_is_scroll,
+                      int* new_height_out) {
+  if (viewport_height < 1) {
+    return 0;
+  }
+  std::vector<Row> old_rows = SnapshotRows(old_snapshot);
+  std::vector<Row> new_rows = SnapshotRows(new_snapshot);
+  if (old_rows.empty() || new_rows.empty()) {
+    return 0;
+  }
+  if (new_height_out != nullptr) {
+    *new_height_out = static_cast<int>(new_rows.size());
+  }
+  const int new_max = ClampMax(new_rows, viewport_height);
+  const int old_max = ClampMax(old_rows, viewport_height);
+
+  int idx = std::clamp(old_selected, 0, static_cast<int>(old_rows.size()) - 1);
+  while (idx > 0 && old_rows[idx].text.empty()) {
+    --idx;
+  }
+  const int delta = old_selected - idx;
+  const std::string fp = Fingerprint(old_rows[idx].text);
+
+  const std::vector<int> old_bounds = BoundsFromSpans(old_snapshot);
+  const std::vector<int> new_bounds = BoundsFromSpans(new_snapshot);
+
+  if (auto hit = HeadingAnchor(old_bounds, new_bounds, idx, delta,
+                               old_selected, old_max, new_max)) {
+    return *hit;
+  }
+  const int est = Proportional(old_selected, old_max, new_max);
+  const int section = SectionId(old_bounds, idx);
+  const SectionMatch m =
+      MatchSection(new_rows, new_bounds, section, fp, est, old_is_scroll);
+  const int pos = (m.row >= 0) ? m.row : est;
+  return std::clamp(pos + delta, 0, new_max);
 }
 
 std::vector<std::pair<int, int>> LocateHeadingRows(

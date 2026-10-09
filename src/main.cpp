@@ -187,8 +187,12 @@ int main(int argc, char** argv) {
   int wrap_hint_h = -1;
   // Immutable layout snapshot of `cached_content` at the current width. It is
   // the authoritative wrap-mode content height, complete beyond the old
-  // 65,536-row measurement cap. Rebuilt only when the tree or width changes.
-  markit::LayoutSnapshot content_snapshot;
+  // 65,536-row measurement cap, and the source of structural heading spans.
+  // Rebuilt only when the tree or width changes. Held by shared_ptr so a mode
+  // toggle can build the new tree against a fresh snapshot while the old one
+  // is still needed for offset mapping.
+  std::shared_ptr<markit::LayoutSnapshot> content_snapshot =
+      std::make_shared<markit::LayoutSnapshot>();
   int content_snapshot_width = -1;
 
   // Building the content tree re-parses the whole document, so cache it and
@@ -205,10 +209,6 @@ int main(int argc, char** argv) {
   // Static nav content: headings extracted once (no interaction yet).
   const std::vector<markit::Heading> headings =
       markit::ExtractHeadings(contents);
-  // Heading text is immutable for the lifetime of the viewer. Normalize it
-  // once so resize, navigation, and mode-toggle remaps reuse the same cache.
-  const markit::HeadingFingerprints heading_fingerprints =
-      markit::BuildHeadingFingerprints(headings);
 
   // Nav-highlight cache: heading (row, heading-index) pairs for the live
   // content tree. Locating headings needs an offscreen layout, so it runs
@@ -349,7 +349,7 @@ int main(int argc, char** argv) {
       rendered_mode = content_cfg.horizontal_wrap;
       Element fresh = markit::RenderMarkdownRecording(
           contents, content_cfg.theme, content_cfg.horizontal_wrap,
-          content_snapshot);
+          *content_snapshot);
       cached_content =
           is_empty_placeholder ? fresh | dim : std::move(fresh);
       content_snapshot_width = -1;  // tree changed; recapture below.
@@ -360,12 +360,12 @@ int main(int argc, char** argv) {
     // natural requirement height is already complete; the snapshot is still
     // captured there for structural heading spans.
     if (content_snapshot_width != viewport_width) {
-      content_snapshot.Build(cached_content, viewport_width);
+      content_snapshot->Build(cached_content, viewport_width);
       content_snapshot_width = viewport_width;
     }
     if (!hscroll) {
       wrap_hint_w = viewport_width;
-      wrap_hint_h = content_snapshot.height();
+      wrap_hint_h = content_snapshot->height();
     }
     // Match state is prepared by the service step before this draw; the
     // renderer only reads the already-computed row/span pointers, so no RE2
@@ -391,10 +391,10 @@ int main(int argc, char** argv) {
   // both agree on section boundaries.
   auto refresh_heading_map = [&] {
     if (cached_content && viewport_width >= 1 && viewport_height >= 1 &&
-        content_snapshot.height() > 0 &&
+        content_snapshot->height() > 0 &&
         (!hl_tree || hl_tree.get() != cached_content.get() ||
          hl_width != viewport_width || hl_scroll != hscroll)) {
-      hl_map = markit::LocateHeadingRows(content_snapshot);
+      hl_map = markit::LocateHeadingRows(*content_snapshot);
       hl_tree = cached_content;
       hl_width = viewport_width;
       hl_scroll = hscroll;
@@ -1155,31 +1155,48 @@ int main(int argc, char** argv) {
     }
     if (markit::MatchesKey(event, kb.toggle_wrap)) {
       const bool old_is_scroll = hscroll;
-      Element old_tree = cached_content;
+      // Ensure the old snapshot is captured at the old mode's mapping width:
+      // wrap uses the viewport width, scroll uses the natural width so the
+      // anchor row text is complete (no clipping ambiguity).
+      if (old_is_scroll) {
+        const int old_width =
+            markit::SearchExtractWidth(cached_content, viewport_width, true);
+        content_snapshot->Build(cached_content, old_width);
+        content_snapshot_width = old_width;
+      } else if (content_snapshot_width != viewport_width) {
+        content_snapshot->Build(cached_content, viewport_width);
+        content_snapshot_width = viewport_width;
+      }
+
       hscroll = !hscroll;
       search_document_gen.fetch_add(1);
       content_cfg.horizontal_wrap =
           hscroll ? markit::WrapMode::Scroll : markit::WrapMode::Wrap;
       selected_x = 0;  // re-anchor horizontally on mode switch.
-      // Rebuild the content tree for the new mode eagerly so the vertical
-      // offset can be mapped from the old tree (row numbers differ per
-      // mode); the content renderer below reuses this tree as-is.
+
+      // Build the new tree against a fresh snapshot so the old snapshot stays
+      // valid for the offset mapping, then map the offset between the two
+      // complete snapshots (no 65,536-row cap).
+      auto next_snapshot = std::make_shared<markit::LayoutSnapshot>();
       Element fresh = markit::RenderMarkdownRecording(
           contents, content_cfg.theme, content_cfg.horizontal_wrap,
-          content_snapshot);
+          *next_snapshot);
       fresh = is_empty_placeholder ? fresh | dim : std::move(fresh);
-      cached_content = fresh;
+      const int new_width =
+          hscroll ? markit::SearchExtractWidth(fresh, viewport_width, true)
+                  : viewport_width;
+      next_snapshot->Build(fresh, new_width);
+
+      selected = markit::MapTogglePosition(*content_snapshot, *next_snapshot,
+                                           selected, viewport_height,
+                                           old_is_scroll, nullptr);
+      content_snapshot = std::move(next_snapshot);
+      cached_content = std::move(fresh);
       rendered_mode = content_cfg.horizontal_wrap;
-      content_snapshot_width = -1;  // rebuilt at the new mode's width below.
-      int new_height = 0;
-      selected = markit::MapTogglePosition(
-          old_tree, fresh, selected, viewport_width, viewport_height,
-          old_is_scroll, heading_fingerprints, &new_height);
+      content_snapshot_width = new_width;
       if (!hscroll) {
-        // Toggle target is wrap: hand the anchor's new-tree row count to the
-        // scroller so it adopts the height instead of re-measuring.
         wrap_hint_w = viewport_width;
-        wrap_hint_h = new_height;
+        wrap_hint_h = content_snapshot->height();
       } else {
         wrap_hint_w = -1;
       }
