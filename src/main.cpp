@@ -547,9 +547,11 @@ int main(int argc, char** argv) {
               // of the immutable source and settings, so it is safe off the
               // foreground loop and needs no shared render guard.
               markit::LayoutSnapshot snapshot;
+              bool aborted_build = false;
               markit::BuildMarkdownSnapshot(*source, worker_theme, worker_mode,
-                                            width, snapshot);
-              if (!cancelled()) {
+                                            width, snapshot, cancelled,
+                                            &aborted_build);
+              if (!aborted_build && !cancelled()) {
                 rows = std::make_shared<const std::vector<std::string>>(
                     snapshot.TextRows());
               }

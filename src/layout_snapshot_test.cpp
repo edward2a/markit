@@ -356,6 +356,37 @@ TEST(LayoutSnapshot, TextRowsBeyondRenderCap) {
   EXPECT_NE(rows[rows.size() - 2].find("x"), std::string::npos);
 }
 
+// A cancellation predicate aborts parsing; the snapshot must not be used and
+// the caller is told the build was aborted.
+TEST(LayoutSnapshot, BuildCancellationAbortsParse) {
+  const markit::Theme theme;
+  std::string md;
+  for (int i = 0; i < 1000; ++i) {
+    md += "line " + std::to_string(i) + "\n\n";
+  }
+  markit::LayoutSnapshot snapshot;
+  int calls = 0;
+  auto cancelled = [&] { return ++calls > 10; };
+  bool aborted = false;
+  markit::BuildMarkdownSnapshot(md, theme, markit::WrapMode::Wrap, 40, snapshot,
+                                cancelled, &aborted);
+  EXPECT_TRUE(aborted);
+}
+
+// LayoutSnapshot::Build stops between passes and flags itself cancelled.
+TEST(LayoutSnapshot, LayoutBuildCancellation) {
+  markit::LayoutSnapshot snapshot;
+  ftxui::Elements lines;
+  for (int i = 0; i < 100; ++i) {
+    lines.push_back(markit::SnapshotText(&snapshot, "line"));
+  }
+  int calls = 0;
+  auto cancelled = [&] { return ++calls > 0; };  // cancel before the first pass.
+  snapshot.Build(ftxui::vbox(std::move(lines)), 20, cancelled);
+  EXPECT_TRUE(snapshot.cancelled());
+  EXPECT_EQ(snapshot.height(), 0);
+}
+
 std::string RenderToText(const ftxui::Element& element, int width, int height) {
   ftxui::Screen screen = ftxui::Screen::Create(
       ftxui::Dimension::Fixed(width), ftxui::Dimension::Fixed(height));

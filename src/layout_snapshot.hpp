@@ -15,6 +15,7 @@
 #ifndef MARKIT_LAYOUT_SNAPSHOT_HPP
 #define MARKIT_LAYOUT_SNAPSHOT_HPP
 
+#include <functional>  // for function
 #include <string>  // for string
 #include <utility>  // for pair
 #include <vector>  // for vector
@@ -59,12 +60,16 @@ class LayoutSnapshot {
 
   // Lay out `element` at `width` in a single pass and capture its runs.
   // `element`'s SnapshotText nodes must have been created with `this`.
-  void Build(ftxui::Element element, int width);
+  // `cancelled` is checked between layout passes; if it fires, the build stops
+  // and `cancelled()` is set (the snapshot is incomplete and must be discarded).
+  void Build(ftxui::Element element, int width,
+             const std::function<bool()>& cancelled = {});
 
   int width() const { return width_; }
   int height() const { return height_; }
   int layout_passes() const { return layout_passes_; }
   const std::vector<SnapshotRun>& runs() const { return runs_; }
+  bool cancelled() const { return cancelled_; }
 
   // Heading content-row spans, indexed by markdown heading occurrence ordinal:
   // entry i is {first_row, last_row} (inclusive). Empty when the tree was not
@@ -104,6 +109,7 @@ class LayoutSnapshot {
   int height_ = 0;
   int layout_passes_ = 0;
   bool recording_ = false;
+  bool cancelled_ = false;
   std::vector<SnapshotRun> runs_;
   std::vector<std::vector<int>> row_runs_;  // row -> indices into runs_
   std::vector<std::pair<int, int>> heading_spans_;

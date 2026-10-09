@@ -15,6 +15,7 @@
 #include <algorithm>  // for max
 #include <cctype>     // for tolower/isspace/isalnum (HTML tag parsing)
 #include <cstdint>    // for uint32_t (UTF-8 validation)
+#include <functional>  // for function (cancellation predicate)
 #include <memory>     // for make_shared
 #include <string>     // for string, to_string
 #include <string_view>  // for string_view
@@ -447,6 +448,13 @@ class Renderer {
   // snapshot must outlive the returned tree.
   void set_snapshot(LayoutSnapshot* snapshot) { snapshot_ = snapshot; }
 
+  // Abort parsing once `cancelled` returns true. The returned tree is partial
+  // and `aborted()` is set; callers must discard it.
+  void set_cancelled(std::function<bool()> cancelled) {
+    cancelled_ = std::move(cancelled);
+  }
+  bool aborted() const { return aborted_; }
+
   Element Run() {
     MD_PARSER parser = {};
     parser.abi_version = 0;
@@ -460,8 +468,12 @@ class Renderer {
     parser.leave_span = &Renderer::cb_leave_span;
     parser.text = &Renderer::cb_text;
 
-    md_parse(reinterpret_cast<const MD_CHAR*>(source_.data()), source_.size(),
-             &parser, this);
+    const int parse_result =
+        md_parse(reinterpret_cast<const MD_CHAR*>(source_.data()),
+                 source_.size(), &parser, this);
+    if (parse_result != 0) {
+      aborted_ = true;
+    }
 
     FlushPendingHtml();  // trailing verbatim HTML coalesced across blocks.
     // A heading at EOF still owes its trailing gap, but there is no next
@@ -1670,7 +1682,12 @@ class Renderer {
 
   // ---- md4c callback dispatchers -----------------------------------------
   static int cb_enter_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
-    return static_cast<Renderer*>(userdata)->EnterBlockImpl(type, detail);
+    auto* self = static_cast<Renderer*>(userdata);
+    if (self->cancelled_ && self->cancelled_()) {
+      self->aborted_ = true;
+      return 1;
+    }
+    return self->EnterBlockImpl(type, detail);
   }
   static int cb_leave_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
     return static_cast<Renderer*>(userdata)->LeaveBlockImpl(type, detail);
@@ -1683,7 +1700,12 @@ class Renderer {
   }
   static int cb_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size,
                      void* userdata) {
-    return static_cast<Renderer*>(userdata)->TextImpl(type, text, size);
+    auto* self = static_cast<Renderer*>(userdata);
+    if (self->cancelled_ && self->cancelled_()) {
+      self->aborted_ = true;
+      return 1;
+    }
+    return self->TextImpl(type, text, size);
   }
 
   // ---- md4c callbacks -----------------------------------------------------
@@ -2288,6 +2310,8 @@ class Renderer {
   const bool wrap_;
   LayoutSnapshot* snapshot_ = nullptr;
   unsigned heading_ordinal_ = 0;
+  std::function<bool()> cancelled_;
+  bool aborted_ = false;
   std::vector<Frame> frames_;
   std::vector<Decorator> span_decorators_;
   std::vector<std::string> span_keys_;
@@ -2331,17 +2355,32 @@ Element RenderMarkdown(const std::string& markdown, const Theme& theme,
 
 Element BuildMarkdownSnapshot(const std::string& markdown, const Theme& theme,
                               WrapMode mode, int width,
-                              LayoutSnapshot& snapshot) {
-  Element tree = RenderMarkdownRecording(markdown, theme, mode, snapshot);
-  snapshot.Build(tree, width);
+                              LayoutSnapshot& snapshot,
+                              const std::function<bool()>& cancelled,
+                              bool* aborted) {
+  Element tree = RenderMarkdownRecording(markdown, theme, mode, snapshot,
+                                         cancelled);
+  if (cancelled && cancelled()) {
+    if (aborted != nullptr) {
+      *aborted = true;
+    }
+    return tree;
+  }
+  snapshot.Build(tree, width, cancelled);
+  if (snapshot.cancelled() && aborted != nullptr) {
+    *aborted = true;
+  }
   return tree;
 }
 
 Element RenderMarkdownRecording(const std::string& markdown, const Theme& theme,
-                                WrapMode mode, LayoutSnapshot& snapshot) {
+                                WrapMode mode, LayoutSnapshot& snapshot,
+                                const std::function<bool()>& cancelled) {
   Renderer renderer(markdown, theme, mode);
   renderer.set_snapshot(&snapshot);
-  return renderer.Run();
+  renderer.set_cancelled(cancelled);
+  Element tree = renderer.Run();
+  return tree;
 }
 
 }  // namespace markit

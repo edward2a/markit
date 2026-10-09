@@ -193,13 +193,15 @@ ftxui::Element SnapshotHeading(LayoutSnapshot* snapshot, int ordinal,
                                                std::move(child));
 }
 
-void LayoutSnapshot::Build(ftxui::Element element, int width) {
+void LayoutSnapshot::Build(ftxui::Element element, int width,
+                           const std::function<bool()>& cancelled) {
   runs_.clear();
   row_runs_.clear();
   heading_spans_.clear();
   width_ = std::max(0, width);
   height_ = 0;
   layout_passes_ = 0;
+  cancelled_ = false;
   if (!element) {
     return;
   }
@@ -209,6 +211,10 @@ void LayoutSnapshot::Build(ftxui::Element element, int width) {
   element->Check(&status);
   int iterations = 0;
   do {
+    if (cancelled && cancelled()) {
+      cancelled_ = true;
+      break;
+    }
     runs_.clear();
     heading_spans_.clear();
     element->ComputeRequirement();
