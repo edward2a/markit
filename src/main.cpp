@@ -27,6 +27,7 @@
 #include "chrome.hpp"
 #include "anchor.hpp"
 #include "config.hpp"
+#include "layout_snapshot.hpp"
 #include "markdown.hpp"
 #include "scroller.hpp"
 #include "search.hpp"
@@ -184,6 +185,11 @@ int main(int argc, char** argv) {
   // instead of measuring again. Width -1 disables.
   int wrap_hint_w = -1;
   int wrap_hint_h = -1;
+  // Immutable layout snapshot of `cached_content` at the current width. It is
+  // the authoritative wrap-mode content height, complete beyond the old
+  // 65,536-row measurement cap. Rebuilt only when the tree or width changes.
+  markit::LayoutSnapshot content_snapshot;
+  int content_snapshot_width = -1;
 
   // Building the content tree re-parses the whole document, so cache it and
   // rebuild only when the display mode changes. The viewport size is
@@ -341,9 +347,24 @@ int main(int argc, char** argv) {
     viewport_height = std::max(1, term_size.dimy - kChromeRows);
     if (!cached_content || rendered_mode != content_cfg.horizontal_wrap) {
       rendered_mode = content_cfg.horizontal_wrap;
-      Element fresh = markit::RenderMarkdown(contents, content_cfg);
+      Element fresh = markit::RenderMarkdownRecording(
+          contents, content_cfg.theme, content_cfg.horizontal_wrap,
+          content_snapshot);
       cached_content =
           is_empty_placeholder ? fresh | dim : std::move(fresh);
+      content_snapshot_width = -1;  // tree changed; recapture below.
+    }
+    // Capture the wrap-mode height from the snapshot (one layout pass, no
+    // full-height screen) and hand it to the scroller, so a tall document is
+    // no longer capped at 65,536 rows. Scroll mode has no wrapping, so the
+    // natural requirement height is already complete.
+    if (!hscroll) {
+      if (content_snapshot_width != viewport_width) {
+        content_snapshot.Build(cached_content, viewport_width);
+        content_snapshot_width = viewport_width;
+      }
+      wrap_hint_w = viewport_width;
+      wrap_hint_h = content_snapshot.height();
     }
     // Match state is prepared by the service step before this draw; the
     // renderer only reads the already-computed row/span pointers, so no RE2
@@ -483,7 +504,6 @@ int main(int argc, char** argv) {
     const std::string* source = &contents;
     const int vw = viewport_width;
     const bool sc = hscroll;
-    const int hint = std::max(1, content_height);
     const std::string query = search_query;
     const bool case_sensitive = config.search_case_sensitive;
     const bool rows_current =
@@ -501,7 +521,7 @@ int main(int argc, char** argv) {
     try {
       search_worker = std::thread(
         [&, gen, document, layout, source, worker_theme, worker_mode, vw, sc,
-         width, hint, query, case_sensitive, input_rows] {
+         width, query, case_sensitive, input_rows] {
           // A flight is obsolete once its generation or layout/document
           // changes; the foreground bumps these on query/layout/shutdown.
           auto cancelled = [&] {
@@ -521,18 +541,18 @@ int main(int argc, char** argv) {
           try {
             std::shared_ptr<const std::vector<std::string>> rows = input_rows;
             if (!rows && !cancelled()) {
-              // Private tree: RenderMarkdown is a pure function of its inputs.
-              // The offscreen extraction locks the shared render guard per
-              // window (inside RenderTextRows) and honours cancellation between
-              // windows, so it neither blocks the foreground for the whole
-              // document nor runs to completion after being superseded.
-              ftxui::Element tree =
-                  markit::RenderMarkdown(*source, worker_theme, worker_mode);
-              std::vector<std::string> extracted =
-                  markit::RenderTextRows(tree, width, hint, &render_mu,
-                                         cancelled);
-              rows = std::make_shared<const std::vector<std::string>>(
-                  std::move(extracted));
+              // Build a complete immutable snapshot instead of rendering
+              // bounded screen tiles: one layout pass, no 65,536-row cap and
+              // no full-height screen allocation. The tree is a pure function
+              // of the immutable source and settings, so it is safe off the
+              // foreground loop and needs no shared render guard.
+              markit::LayoutSnapshot snapshot;
+              markit::BuildMarkdownSnapshot(*source, worker_theme, worker_mode,
+                                            width, snapshot);
+              if (!cancelled()) {
+                rows = std::make_shared<const std::vector<std::string>>(
+                    snapshot.TextRows());
+              }
             }
             if (cancelled()) {
               aborted = true;  // rows (if any) may be a partial extraction.
@@ -1144,10 +1164,13 @@ int main(int argc, char** argv) {
       // Rebuild the content tree for the new mode eagerly so the vertical
       // offset can be mapped from the old tree (row numbers differ per
       // mode); the content renderer below reuses this tree as-is.
-      Element fresh = markit::RenderMarkdown(contents, content_cfg);
+      Element fresh = markit::RenderMarkdownRecording(
+          contents, content_cfg.theme, content_cfg.horizontal_wrap,
+          content_snapshot);
       fresh = is_empty_placeholder ? fresh | dim : std::move(fresh);
       cached_content = fresh;
       rendered_mode = content_cfg.horizontal_wrap;
+      content_snapshot_width = -1;  // rebuilt at the new mode's width below.
       int new_height = 0;
       selected = markit::MapTogglePosition(
           old_tree, fresh, selected, viewport_width, viewport_height,

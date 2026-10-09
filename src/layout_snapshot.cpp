@@ -240,6 +240,24 @@ std::string LayoutSnapshot::RowSparseText(int row) const {
   return out;
 }
 
+std::vector<std::string> LayoutSnapshot::TextRows() const {
+  std::vector<std::string> out;
+  out.reserve(static_cast<size_t>(std::max(0, height_)));
+  int last = -1;
+  for (int row = 0; row < height_; ++row) {
+    std::string text = RowSparseText(row);
+    for (char c : text) {
+      if (c != ' ') {
+        last = row;
+        break;
+      }
+    }
+    out.push_back(std::move(text));
+  }
+  out.resize(static_cast<size_t>(last + 1));
+  return out;
+}
+
 std::vector<std::string> LayoutSnapshot::Rows(int first, int last) const {
   std::vector<std::string> out;
   if (first < 0) {

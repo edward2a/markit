@@ -10,7 +10,9 @@
 #include <ftxui/screen/screen.hpp>  // for Screen
 
 #include "layout_snapshot.hpp"
-#include "anchor.hpp"  // for RenderTextRows (reference extraction)
+#include "anchor.hpp"    // for RenderTextRows (reference extraction)
+#include "markdown.hpp"  // for RenderMarkdown / BuildMarkdownSnapshot
+#include "theme.hpp"     // for Theme
 
 namespace {
 
@@ -244,6 +246,113 @@ TEST(LayoutSnapshot, TallMixedDocumentParityWithExtraction) {
   EXPECT_EQ(snapshot.layout_passes(), 1);
   EXPECT_GT(snapshot.height(), kBlocks);
   ExpectParityWithExtraction(snapshot, tree, kWidth);
+}
+
+// The renderer's snapshot capture must reproduce the reference extraction for
+// real Markdown (headings, lists, quotes, code, tables, links, rules). The
+// reference tree is built independently without a snapshot, so this checks the
+// capture wiring, not just the snapshot primitives.
+void ExpectMarkdownParity(const std::string& markdown, markit::WrapMode mode,
+                          int width) {
+  const markit::Theme theme;
+  ftxui::Element reference = markit::RenderMarkdown(markdown, theme, mode);
+  const int effective =
+      mode == markit::WrapMode::Scroll
+          ? markit::SearchExtractWidth(reference, width, /*is_scroll=*/true)
+          : width;
+
+  markit::LayoutSnapshot snapshot;
+  markit::BuildMarkdownSnapshot(markdown, theme, mode, effective, snapshot);
+
+  const std::vector<std::string> expected =
+      markit::RenderTextRows(reference, effective, snapshot.height());
+  ASSERT_LE(expected.size(), static_cast<size_t>(snapshot.height()));
+  for (size_t row = 0; row < expected.size(); ++row) {
+    EXPECT_EQ(snapshot.RowSparseText(static_cast<int>(row)), expected[row])
+        << "row " << row;
+  }
+}
+
+const char* kRichDocument() {
+  return "# Title\n"
+         "\n"
+         "A paragraph with **bold**, _italic_, `code`, and a "
+         "[link](https://example.com/path).\n"
+         "\n"
+         "## Section\n"
+         "\n"
+         "- first item\n"
+         "- second item with a longer body that should wrap at narrow widths\n"
+         "\n"
+         "> a quoted line\n"
+         "> spanning two source lines\n"
+         "\n"
+         "```cpp\n"
+         "int main() {\n"
+         "  return 0;\n"
+         "}\n"
+         "```\n"
+         "\n"
+         "| left | right |\n"
+         "| ---- | ----- |\n"
+         "| a    | b     |\n"
+         "| c    | d     |\n"
+         "\n"
+         "---\n"
+         "\n"
+         "Tail paragraph after a rule.\n";
+}
+
+TEST(LayoutSnapshot, MarkdownWrapParityWithExtraction) {
+  ExpectMarkdownParity(kRichDocument(), markit::WrapMode::Wrap, 40);
+  ExpectMarkdownParity(kRichDocument(), markit::WrapMode::Wrap, 80);
+  ExpectMarkdownParity(kRichDocument(), markit::WrapMode::Wrap, 24);
+}
+
+TEST(LayoutSnapshot, MarkdownScrollParityWithExtraction) {
+  ExpectMarkdownParity(kRichDocument(), markit::WrapMode::Scroll, 80);
+  ExpectMarkdownParity(kRichDocument(), markit::WrapMode::Scroll, 40);
+}
+
+std::string RenderToText(const ftxui::Element& element, int width, int height) {
+  ftxui::Screen screen = ftxui::Screen::Create(
+      ftxui::Dimension::Fixed(width), ftxui::Dimension::Fixed(height));
+  ftxui::Render(screen, element);
+  return screen.ToString();
+}
+
+// A snapshot-bound tree (used for live painting in the migration) must render
+// byte-for-byte like the plain FTXUI tree, so switching the live content path
+// to snapshot primitives cannot change what the user sees.
+void ExpectRenderParity(const std::string& markdown, markit::WrapMode mode,
+                        int width, int height) {
+  const markit::Theme theme;
+  markit::LayoutSnapshot snapshot;
+  ftxui::Element bound =
+      markit::BuildMarkdownSnapshot(markdown, theme, mode, width, snapshot);
+  ftxui::Element plain = markit::RenderMarkdown(markdown, theme, mode);
+  EXPECT_EQ(RenderToText(bound, width, height),
+            RenderToText(plain, width, height));
+}
+
+TEST(LayoutSnapshot, MarkdownRenderParityWrap) {
+  ExpectRenderParity(kRichDocument(), markit::WrapMode::Wrap, 40, 30);
+  ExpectRenderParity(kRichDocument(), markit::WrapMode::Wrap, 80, 40);
+  ExpectRenderParity(kRichDocument(), markit::WrapMode::Wrap, 24, 50);
+}
+
+TEST(LayoutSnapshot, MarkdownRenderParityScroll) {
+  ExpectRenderParity(kRichDocument(), markit::WrapMode::Scroll, 40, 30);
+  ExpectRenderParity(kRichDocument(), markit::WrapMode::Scroll, 80, 40);
+}
+
+// A combining mark after a wide base exercises the app-owned combining-unit
+// node; the snapshot-bound tree must render it exactly like the plain tree.
+TEST(LayoutSnapshot, MarkdownCombiningRenderParity) {
+  const std::string md = "\uFF26\u0301oo and \uFF26\u0301ar\n";
+  ExpectRenderParity(md, markit::WrapMode::Wrap, 20, 5);
+  ExpectRenderParity(md, markit::WrapMode::Scroll, 20, 5);
+  ExpectMarkdownParity(md, markit::WrapMode::Wrap, 20);
 }
 
 

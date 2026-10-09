@@ -3,6 +3,7 @@
 
 #include "config.hpp"
 #include "entity_decode.hpp"
+#include "layout_snapshot.hpp"
 
 #include <md4c.h>
 
@@ -274,13 +275,23 @@ bool ContainsCombiningMark(std::string_view s) {
 // text keeps FTXUI's text() (and its selection support).
 class CombiningText : public ftxui::Node {
  public:
-  explicit CombiningText(std::string_view text) {
+  explicit CombiningText(std::string_view text,
+                         LayoutSnapshot* snapshot = nullptr)
+      : snapshot_(snapshot) {
     Build(text);
     requirement_.min_x = max_width_;
     requirement_.min_y = static_cast<int>(lines_.size());
   }
 
   void ComputeRequirement() override {}
+
+  void SetBox(ftxui::Box box) override {
+    ftxui::Node::SetBox(box);
+    if (snapshot_ != nullptr && snapshot_->recording() &&
+        box.x_min <= box.x_max && box.y_min <= box.y_max) {
+      snapshot_->AddRun(SnapshotRun{box.y_min, box.x_min, raw_text_, false});
+    }
+  }
 
   void Render(ftxui::Screen& screen) override {
     const ftxui::Box visible = ftxui::Box::Intersection(screen.stencil, box_);
@@ -313,6 +324,7 @@ class CombiningText : public ftxui::Node {
   };
 
   void Build(std::string_view text) {
+    raw_text_.assign(text);
     std::vector<Unit> units;
     auto flush = [&]() {
       lines_.emplace_back();
@@ -360,16 +372,42 @@ class CombiningText : public ftxui::Node {
 
   std::vector<std::vector<std::string>> lines_;
   int max_width_ = 0;
+  LayoutSnapshot* snapshot_ = nullptr;
+  std::string raw_text_;
 };
 
-Element StyledText(std::string text, const Decorator& style) {
-  Element e = ContainsCombiningMark(text)
-                  ? std::make_shared<CombiningText>(text)
-                  : ftxui::text(std::move(text));
+// Build a styled text element. When `snapshot` is non-null the element records
+// its position during LayoutSnapshot::Build so the document text can be
+// recovered without rendering a screen; the combining-unit node is only needed
+// for live rendering (a snapshot records the raw base+mark text).
+Element MakeText(LayoutSnapshot* snapshot, std::string text,
+                 const Decorator& style) {
+  Element e;
+  if (ContainsCombiningMark(text)) {
+    // Keep the combining-unit node for live rendering (it fixes wide-base
+    // continuation placement) and let it record the raw base+mark text when a
+    // snapshot is active.
+    e = std::make_shared<CombiningText>(text, snapshot);
+  } else if (snapshot != nullptr) {
+    e = SnapshotText(snapshot, std::move(text));
+  } else {
+    e = ftxui::text(std::move(text));
+  }
   if (style) {
     e = style(std::move(e));
   }
   return e;
+}
+
+// Horizontal rule / block border helpers that record their positions when a
+// snapshot is active, and fall back to the FTXUI primitives otherwise.
+Element MakeSeparator(LayoutSnapshot* snapshot) {
+  return snapshot != nullptr ? SnapshotSeparator(snapshot) : ftxui::separator();
+}
+
+Element MakeBorder(LayoutSnapshot* snapshot, Element child) {
+  return snapshot != nullptr ? SnapshotBorder(snapshot, std::move(child))
+                             : ftxui::borderLight(std::move(child));
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +428,10 @@ class Renderer {
 
   explicit Renderer(const std::string& markdown, const Config& config)
       : Renderer(markdown, config.theme, config.horizontal_wrap) {}
+
+  // Record text/rule/border positions into `snapshot` while building. The
+  // snapshot must outlive the returned tree.
+  void set_snapshot(LayoutSnapshot* snapshot) { snapshot_ = snapshot; }
 
   Element Run() {
     MD_PARSER parser = {};
@@ -413,7 +455,8 @@ class Renderer {
     Frame doc = std::move(frames_.back());
     frames_.pop_back();
     if (doc.children.empty()) {
-      doc.children.push_back(ftxui::text("(empty document)"));
+      doc.children.push_back(
+          MakeText(snapshot_, "(empty document)", Decorator(nullptr)));
     }
     return ftxui::vbox(std::move(doc.children));
   }
@@ -665,7 +708,7 @@ class Renderer {
       Elements pieces;
       pieces.reserve(cur.size());
       for (auto& piece : cur) {
-        pieces.push_back(StyledText(std::move(piece.text), piece.style));
+        pieces.push_back(MakeText(snapshot_, std::move(piece.text), piece.style));
       }
       words.push_back(pieces.size() == 1 ? std::move(pieces[0])
                                          : ftxui::hbox(std::move(pieces)));
@@ -769,7 +812,7 @@ class Renderer {
     Elements items;
     items.reserve(fragments.size());
     for (auto& frag : fragments) {
-      items.push_back(StyledText(std::move(frag.text), frag.style));
+      items.push_back(MakeText(snapshot_, std::move(frag.text), frag.style));
     }
     return ftxui::hbox(std::move(items));
   }
@@ -1449,7 +1492,7 @@ class Renderer {
       if (!closing) {
         CloseHtmlPara();
         FlushHtmlText();
-        AttachHr(ftxui::separator());
+        AttachHr(MakeSeparator(snapshot_));
       }
       return;
     }
@@ -1647,7 +1690,7 @@ class Renderer {
         break;
       }
       case MD_BLOCK_HR:
-        AttachHr(ftxui::separator());
+        AttachHr(MakeSeparator(snapshot_));
         break;
       case MD_BLOCK_QUOTE:
         Push(Frame::Quote());
@@ -1750,7 +1793,7 @@ class Renderer {
         Elements rows;
         for (auto& c : top.children) {
           rows.push_back(ftxui::hbox({
-              ftxui::text("│ ") | ftxui::color(theme_.quote_marker),
+              MakeText(snapshot_, "│ ", ftxui::color(theme_.quote_marker)),
               std::move(c),
           }));
         }
@@ -1788,7 +1831,7 @@ class Renderer {
                               ? std::move(children[0])
                               : ftxui::vbox(std::move(children));
         Attach(ftxui::hbox({
-                   ftxui::text(bullet),
+                   MakeText(snapshot_, bullet, Decorator(nullptr)),
                    std::move(content),
                }),
                false);
@@ -2076,7 +2119,8 @@ class Renderer {
     }
 
     auto token_text = [this](std::string s) {
-      return ftxui::text(std::move(s)) | ftxui::color(theme_.code_block_fg);
+      return MakeText(snapshot_, std::move(s),
+                      ftxui::color(theme_.code_block_fg));
     };
 
     Elements rows;
@@ -2137,8 +2181,9 @@ class Renderer {
     // Both modes: the box spans the full content width, like tables. In wrap
     // mode hflow reflows each line inside it; in scroll mode the box keeps
     // its natural width and pans with the rest of the content.
-    return ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme_.code_block_bg) |
-           ftxui::borderLight;
+    return MakeBorder(
+        snapshot_,
+        ftxui::vbox(std::move(rows)) | ftxui::bgcolor(theme_.code_block_bg));
   }
 
   Element TableElement(
@@ -2177,13 +2222,14 @@ class Renderer {
         row_cells.push_back(std::move(padded));
         if (i + 1 < columns) {  // one-column gutter between cells.
           row_cells.push_back(
-              ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 1)(ftxui::text(" ")));
+              ftxui::size(ftxui::WIDTH, ftxui::EQUAL, 1)(
+                  MakeText(snapshot_, " ", Decorator(nullptr))));
         }
         ++i;
       }
       rows_el.push_back(ftxui::hbox(std::move(row_cells)));
     }
-    return ftxui::vbox(std::move(rows_el)) | ftxui::borderLight;
+    return MakeBorder(snapshot_, ftxui::vbox(std::move(rows_el)));
   }
 
   // --- Theme-styled helpers --------------------------------------------------
@@ -2220,6 +2266,7 @@ class Renderer {
   const std::string& source_;
   const Theme& theme_;
   const bool wrap_;
+  LayoutSnapshot* snapshot_ = nullptr;
   std::vector<Frame> frames_;
   std::vector<Decorator> span_decorators_;
   std::vector<std::string> span_keys_;
@@ -2259,6 +2306,21 @@ Element RenderMarkdown(const std::string& markdown) {
 Element RenderMarkdown(const std::string& markdown, const Theme& theme,
                        WrapMode mode) {
   return Renderer(markdown, theme, mode).Run();
+}
+
+Element BuildMarkdownSnapshot(const std::string& markdown, const Theme& theme,
+                              WrapMode mode, int width,
+                              LayoutSnapshot& snapshot) {
+  Element tree = RenderMarkdownRecording(markdown, theme, mode, snapshot);
+  snapshot.Build(tree, width);
+  return tree;
+}
+
+Element RenderMarkdownRecording(const std::string& markdown, const Theme& theme,
+                                WrapMode mode, LayoutSnapshot& snapshot) {
+  Renderer renderer(markdown, theme, mode);
+  renderer.set_snapshot(&snapshot);
+  return renderer.Run();
 }
 
 }  // namespace markit

@@ -17,6 +17,7 @@
 namespace markit {
 
 struct Config;
+class LayoutSnapshot;
 
 /// @brief Parse @p markdown and render it into an FTXUI Element.
 /// @param markdown UTF-8 markdown source text.
@@ -32,6 +33,22 @@ ftxui::Element RenderMarkdown(const std::string& markdown);
 // the interactive Config, such as the asynchronous search extractor.
 ftxui::Element RenderMarkdown(const std::string& markdown, const Theme& theme,
                               WrapMode mode);
+
+// Build an immutable LayoutSnapshot for @p markdown at @p width and return the
+// tree that produced it. The tree is rendered with snapshot-recording
+// primitives, so captured rows include text, list markers, quote markers,
+// code/table borders and rules. `snapshot` must outlive the returned tree. The
+// complete layout has no height cap and allocates no screen.
+ftxui::Element BuildMarkdownSnapshot(const std::string& markdown,
+                                     const Theme& theme, WrapMode mode,
+                                     int width, LayoutSnapshot& snapshot);
+
+// Build the tree bound to @p snapshot without laying it out. Call
+// LayoutSnapshot::Build(tree, width) later to capture at the current width
+// (the tree itself is width-independent). `snapshot` must outlive the tree.
+ftxui::Element RenderMarkdownRecording(const std::string& markdown,
+                                       const Theme& theme, WrapMode mode,
+                                       LayoutSnapshot& snapshot);
 
 }  // namespace markit
 

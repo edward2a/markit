@@ -72,6 +72,11 @@ class LayoutSnapshot {
   // visited, so the cost is independent of the document height.
   std::vector<std::string> Rows(int first, int last) const;
 
+  // Sparse text for every content row, trimmed to the last row that carries a
+  // non-space glyph. This mirrors the reference RenderTextRows output, which
+  // is the displayed-text row set search matches against.
+  std::vector<std::string> TextRows() const;
+
   // Build-time hook used by SnapshotText; not for general use.
   bool recording() const { return recording_; }
   void AddRun(const SnapshotRun& run);
