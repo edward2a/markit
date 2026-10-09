@@ -1,6 +1,8 @@
 // Implementation of the section-scoped content anchor. See anchor.hpp.
 #include "anchor.hpp"
 
+#include "layout_snapshot.hpp"
+
 #include <algorithm>  // for clamp, count_if, max
 #include <cmath>      // for llround
 #include <cstdlib>    // for abs
@@ -658,6 +660,21 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
       [&](std::size_t row, std::size_t heading) {
         located.emplace_back(static_cast<int>(row), static_cast<int>(heading));
       });
+  return located;
+}
+
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const LayoutSnapshot& snapshot) {
+  std::vector<std::pair<int, int>> located;
+  const std::vector<std::pair<int, int>>& spans = snapshot.heading_spans();
+  located.reserve(spans.size());
+  for (std::size_t ordinal = 0; ordinal < spans.size(); ++ordinal) {
+    const auto& [first, last] = spans[ordinal];
+    if (first < 0 || last < first) {
+      continue;  // heading did not lay out (e.g. no snapshot capture).
+    }
+    located.emplace_back(first, static_cast<int>(ordinal));
+  }
   return located;
 }
 

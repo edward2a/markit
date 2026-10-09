@@ -21,6 +21,8 @@
 
 namespace markit {
 
+class LayoutSnapshot;
+
 // Normalized heading prefixes computed once for an immutable document
 // revision. Reuse this value across heading-map refreshes and mode toggles.
 using HeadingFingerprints = std::vector<std::string>;
@@ -43,6 +45,12 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
 std::vector<std::pair<int, int>> LocateHeadingRows(
     const ftxui::Element& tree, int width, int viewport_height, bool is_scroll,
     const HeadingFingerprints& fingerprints);
+
+// Snapshot overload: ordered (first-content-row, heading-index) pairs from the
+// spans captured at MD_BLOCK_H. Complete beyond the old 65,536-row render cap
+// and independent of text fingerprinting; empty headings still get a row.
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const LayoutSnapshot& snapshot);
 
 // Render `tree` offscreen at `width`, returning one plain-text row per
 // content row (raw cell text, rows through the last non-blank one; interior

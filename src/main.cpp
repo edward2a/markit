@@ -357,12 +357,13 @@ int main(int argc, char** argv) {
     // Capture the wrap-mode height from the snapshot (one layout pass, no
     // full-height screen) and hand it to the scroller, so a tall document is
     // no longer capped at 65,536 rows. Scroll mode has no wrapping, so the
-    // natural requirement height is already complete.
+    // natural requirement height is already complete; the snapshot is still
+    // captured there for structural heading spans.
+    if (content_snapshot_width != viewport_width) {
+      content_snapshot.Build(cached_content, viewport_width);
+      content_snapshot_width = viewport_width;
+    }
     if (!hscroll) {
-      if (content_snapshot_width != viewport_width) {
-        content_snapshot.Build(cached_content, viewport_width);
-        content_snapshot_width = viewport_width;
-      }
       wrap_hint_w = viewport_width;
       wrap_hint_h = content_snapshot.height();
     }
@@ -390,11 +391,10 @@ int main(int argc, char** argv) {
   // both agree on section boundaries.
   auto refresh_heading_map = [&] {
     if (cached_content && viewport_width >= 1 && viewport_height >= 1 &&
+        content_snapshot.height() > 0 &&
         (!hl_tree || hl_tree.get() != cached_content.get() ||
          hl_width != viewport_width || hl_scroll != hscroll)) {
-      hl_map = markit::LocateHeadingRows(cached_content, viewport_width,
-                                         viewport_height, hscroll,
-                                         heading_fingerprints);
+      hl_map = markit::LocateHeadingRows(content_snapshot);
       hl_tree = cached_content;
       hl_width = viewport_width;
       hl_scroll = hscroll;

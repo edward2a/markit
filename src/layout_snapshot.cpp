@@ -146,6 +146,37 @@ class SnapshotSeparatorNode final : public ftxui::Node {
   LayoutSnapshot* snapshot_;
 };
 
+// Records the content-row span of a heading element under its occurrence
+// ordinal, so heading navigation reads a stable row range instead of matching
+// text fingerprints.
+class SnapshotHeadingNode final : public ftxui::Node {
+ public:
+  SnapshotHeadingNode(LayoutSnapshot* snapshot, int ordinal, ftxui::Element child)
+      : ftxui::Node(ftxui::Elements{std::move(child)}),
+        snapshot_(snapshot),
+        ordinal_(ordinal) {}
+
+  void ComputeRequirement() final {
+    ftxui::Node::ComputeRequirement();
+    requirement_ = children_[0]->requirement();
+  }
+
+  void SetBox(ftxui::Box box) final {
+    ftxui::Node::SetBox(box);
+    children_[0]->SetBox(box);
+    if (snapshot_ != nullptr && snapshot_->recording() &&
+        box.y_min <= box.y_max) {
+      snapshot_->AddHeadingSpan(ordinal_, box.y_min, box.y_max);
+    }
+  }
+
+  void Render(ftxui::Screen& screen) final { children_[0]->Render(screen); }
+
+ private:
+  LayoutSnapshot* snapshot_;
+  int ordinal_;
+};
+
 }  // namespace
 
 ftxui::Element SnapshotBorder(LayoutSnapshot* snapshot, ftxui::Element child) {
@@ -156,9 +187,16 @@ ftxui::Element SnapshotSeparator(LayoutSnapshot* snapshot) {
   return std::make_shared<SnapshotSeparatorNode>(snapshot);
 }
 
+ftxui::Element SnapshotHeading(LayoutSnapshot* snapshot, int ordinal,
+                               ftxui::Element child) {
+  return std::make_shared<SnapshotHeadingNode>(snapshot, ordinal,
+                                               std::move(child));
+}
+
 void LayoutSnapshot::Build(ftxui::Element element, int width) {
   runs_.clear();
   row_runs_.clear();
+  heading_spans_.clear();
   width_ = std::max(0, width);
   height_ = 0;
   layout_passes_ = 0;
@@ -172,6 +210,7 @@ void LayoutSnapshot::Build(ftxui::Element element, int width) {
   int iterations = 0;
   do {
     runs_.clear();
+    heading_spans_.clear();
     element->ComputeRequirement();
     const int h = std::max(1, element->requirement().min_y);
     height_ = h;
@@ -205,6 +244,16 @@ void LayoutSnapshot::Build(ftxui::Element element, int width) {
 }
 
 void LayoutSnapshot::AddRun(const SnapshotRun& run) { runs_.push_back(run); }
+
+void LayoutSnapshot::AddHeadingSpan(int ordinal, int first_row, int last_row) {
+  if (ordinal < 0) {
+    return;
+  }
+  if (static_cast<size_t>(ordinal) >= heading_spans_.size()) {
+    heading_spans_.resize(static_cast<size_t>(ordinal) + 1, {-1, -1});
+  }
+  heading_spans_[static_cast<size_t>(ordinal)] = {first_row, last_row};
+}
 
 std::string LayoutSnapshot::RowText(int row) const {
   if (row < 0 || row >= height_ || width_ <= 0) {

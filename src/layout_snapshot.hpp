@@ -16,6 +16,7 @@
 #define MARKIT_LAYOUT_SNAPSHOT_HPP
 
 #include <string>  // for string
+#include <utility>  // for pair
 #include <vector>  // for vector
 
 #include <ftxui/dom/elements.hpp>  // for Element
@@ -46,6 +47,12 @@ ftxui::Element SnapshotBorder(LayoutSnapshot* snapshot, ftxui::Element child);
 // ftxui::separator for horizontal rules.
 ftxui::Element SnapshotSeparator(LayoutSnapshot* snapshot);
 
+// Wrap a heading element so its content-row span (inclusive first/last row) is
+// recorded under `ordinal`, the markdown heading occurrence. Use only for
+// MD_BLOCK_H headings; the ordinal must match the outline heading index.
+ftxui::Element SnapshotHeading(LayoutSnapshot* snapshot, int ordinal,
+                               ftxui::Element child);
+
 class LayoutSnapshot {
  public:
   LayoutSnapshot() = default;
@@ -58,6 +65,13 @@ class LayoutSnapshot {
   int height() const { return height_; }
   int layout_passes() const { return layout_passes_; }
   const std::vector<SnapshotRun>& runs() const { return runs_; }
+
+  // Heading content-row spans, indexed by markdown heading occurrence ordinal:
+  // entry i is {first_row, last_row} (inclusive). Empty when the tree was not
+  // built by a snapshot-recording renderer.
+  const std::vector<std::pair<int, int>>& heading_spans() const {
+    return heading_spans_;
+  }
 
   // Plain text of one content row: run text placed at its columns, spaces
   // elsewhere. Returns an empty string for out-of-range rows.
@@ -80,6 +94,7 @@ class LayoutSnapshot {
   // Build-time hook used by SnapshotText; not for general use.
   bool recording() const { return recording_; }
   void AddRun(const SnapshotRun& run);
+  void AddHeadingSpan(int ordinal, int first_row, int last_row);
 
  private:
   int width_ = 0;
@@ -88,6 +103,7 @@ class LayoutSnapshot {
   bool recording_ = false;
   std::vector<SnapshotRun> runs_;
   std::vector<std::vector<int>> row_runs_;  // row -> indices into runs_
+  std::vector<std::pair<int, int>> heading_spans_;
 };
 
 }  // namespace markit

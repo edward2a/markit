@@ -11,6 +11,7 @@
 
 #include "layout_snapshot.hpp"
 #include "anchor.hpp"    // for RenderTextRows (reference extraction)
+#include "chrome.hpp"    // for ExtractHeadings / Heading
 #include "markdown.hpp"  // for RenderMarkdown / BuildMarkdownSnapshot
 #include "theme.hpp"     // for Theme
 
@@ -353,6 +354,69 @@ TEST(LayoutSnapshot, MarkdownCombiningRenderParity) {
   ExpectRenderParity(md, markit::WrapMode::Wrap, 20, 5);
   ExpectRenderParity(md, markit::WrapMode::Scroll, 20, 5);
   ExpectMarkdownParity(md, markit::WrapMode::Wrap, 20);
+}
+
+// Structural heading spans must agree with the fingerprint-based reference for
+// a normal document, in both modes.
+TEST(LayoutSnapshot, HeadingSpansMatchReference) {
+  const markit::Theme theme;
+  const std::string md = kRichDocument();
+  const std::vector<markit::Heading> headings = markit::ExtractHeadings(md);
+  const markit::HeadingFingerprints fp =
+      markit::BuildHeadingFingerprints(headings);
+
+  markit::LayoutSnapshot wrap_snap;
+  ftxui::Element wrap_tree =
+      markit::BuildMarkdownSnapshot(md, theme, markit::WrapMode::Wrap, 40,
+                                    wrap_snap);
+  EXPECT_EQ(markit::LocateHeadingRows(wrap_snap),
+            markit::LocateHeadingRows(wrap_tree, 40, 24, false, fp));
+
+  markit::LayoutSnapshot scroll_snap;
+  ftxui::Element scroll_tree =
+      markit::BuildMarkdownSnapshot(md, theme, markit::WrapMode::Scroll, 40,
+                                    scroll_snap);
+  EXPECT_EQ(markit::LocateHeadingRows(scroll_snap),
+            markit::LocateHeadingRows(scroll_tree, 40, 24, true, fp));
+}
+
+// Empty and duplicate headings still get structural spans (the fingerprint
+// reference skips empty ones); ordinals stay aligned with ExtractHeadings.
+TEST(LayoutSnapshot, HeadingSpansKeepEmptyAndDuplicateHeadings) {
+  const markit::Theme theme;
+  const std::string md = "# A\n\n#\n\n# A\n\ntext\n";
+  const std::vector<markit::Heading> headings = markit::ExtractHeadings(md);
+  ASSERT_EQ(headings.size(), 3u);
+
+  markit::LayoutSnapshot snapshot;
+  markit::BuildMarkdownSnapshot(md, theme, markit::WrapMode::Wrap, 40, snapshot);
+  const std::vector<std::pair<int, int>> located =
+      markit::LocateHeadingRows(snapshot);
+  ASSERT_EQ(located.size(), 3u);
+  EXPECT_EQ(located[0].second, 0);
+  EXPECT_EQ(located[1].second, 1);  // empty heading still has a row.
+  EXPECT_EQ(located[2].second, 2);
+  EXPECT_LT(located[0].first, located[1].first);
+  EXPECT_LT(located[1].first, located[2].first);
+}
+
+// A heading past the old 65,536-row render cap is still located, proving the
+// structural path has no cutoff.
+TEST(LayoutSnapshot, HeadingSpanBeyondRenderCap) {
+  const markit::Theme theme;
+  std::string md = "```\n";
+  for (int i = 0; i < 70000; ++i) {
+    md += "x\n";
+  }
+  md += "```\n\n# Late Heading\n";
+
+  markit::LayoutSnapshot snapshot;
+  markit::BuildMarkdownSnapshot(md, theme, markit::WrapMode::Wrap, 20, snapshot);
+  ASSERT_GT(snapshot.height(), 65536);
+  const std::vector<std::pair<int, int>> located =
+      markit::LocateHeadingRows(snapshot);
+  ASSERT_EQ(located.size(), 1u);
+  EXPECT_GT(located[0].first, 65536);
 }
 
 

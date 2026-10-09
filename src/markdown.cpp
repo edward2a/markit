@@ -287,9 +287,25 @@ class CombiningText : public ftxui::Node {
 
   void SetBox(ftxui::Box box) override {
     ftxui::Node::SetBox(box);
-    if (snapshot_ != nullptr && snapshot_->recording() &&
-        box.x_min <= box.x_max && box.y_min <= box.y_max) {
-      snapshot_->AddRun(SnapshotRun{box.y_min, box.x_min, raw_text_, false});
+    if (snapshot_ == nullptr || !snapshot_->recording()) {
+      return;
+    }
+    // Record exactly what Render() writes: each laid-out line's glyphs
+    // concatenated. A leading orphan combining mark (dropped by Build) and
+    // wide-unit continuation cells contribute nothing, so search never sees
+    // undisplayed bytes.
+    for (size_t line = 0; line < lines_.size(); ++line) {
+      const int y = box.y_min + static_cast<int>(line);
+      if (y < box.y_min || y > box.y_max) {
+        continue;
+      }
+      std::string text;
+      for (const std::string& glyph : lines_[line]) {
+        text += glyph;
+      }
+      if (!text.empty()) {
+        snapshot_->AddRun(SnapshotRun{y, box.x_min, text, false});
+      }
     }
   }
 
@@ -324,7 +340,6 @@ class CombiningText : public ftxui::Node {
   };
 
   void Build(std::string_view text) {
-    raw_text_.assign(text);
     std::vector<Unit> units;
     auto flush = [&]() {
       lines_.emplace_back();
@@ -373,7 +388,6 @@ class CombiningText : public ftxui::Node {
   std::vector<std::vector<std::string>> lines_;
   int max_width_ = 0;
   LayoutSnapshot* snapshot_ = nullptr;
-  std::string raw_text_;
 };
 
 // Build a styled text element. When `snapshot` is non-null the element records
@@ -508,6 +522,7 @@ class Renderer {
     std::string text;              // verbatim buffer (code/html)
     std::vector<std::pair<bool, std::vector<Element>>> table_rows;
     std::vector<Element> cells;    // current row cells
+    unsigned heading_ordinal = 0;  // markdown heading occurrence (MD_BLOCK_H)
 
     // Named factories: positional `Frame{Kind::X, ...}` literals depend on
     // field order (the trailing bool is `is_header_row`), so construct
@@ -1687,6 +1702,7 @@ class Renderer {
       case MD_BLOCK_H: {
         auto* h = static_cast<MD_BLOCK_H_DETAIL*>(detail);
         Push(Frame::Heading(h->level));
+        Top().heading_ordinal = heading_ordinal_++;
         break;
       }
       case MD_BLOCK_HR:
@@ -1784,6 +1800,10 @@ class Renderer {
         Frame top = Pop();
         Element e = InlineBlocks(top);
         e = ftxui::bold(e) | ftxui::color(HeadingColor(top.heading_level));
+        if (snapshot_ != nullptr) {
+          e = SnapshotHeading(snapshot_, static_cast<int>(top.heading_ordinal),
+                              std::move(e));
+        }
         Attach(std::move(e), true);
         OweHeadingGap();
         break;
@@ -2267,6 +2287,7 @@ class Renderer {
   const Theme& theme_;
   const bool wrap_;
   LayoutSnapshot* snapshot_ = nullptr;
+  unsigned heading_ordinal_ = 0;
   std::vector<Frame> frames_;
   std::vector<Decorator> span_decorators_;
   std::vector<std::string> span_keys_;
