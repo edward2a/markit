@@ -184,15 +184,17 @@ int main(int argc, char** argv) {
   // document layout snapshot below and consumed by the scroller. -1 disables
   // the override (scroll mode / content that does not reflow).
   int wrap_height = -1;
-  // Immutable layout snapshot of `cached_content` at the current width. It is
-  // the authoritative wrap-mode content height, complete beyond the old
-  // 65,536-row measurement cap, and the source of structural heading spans.
-  // Rebuilt only when the tree or width changes. Held by shared_ptr so a mode
-  // toggle can build the new tree against a fresh snapshot while the old one
-  // is still needed for offset mapping.
+  // Immutable layout snapshot of `cached_content`, prepared on the worker for
+  // a geometry key. It is the authoritative content height (complete beyond
+  // the old 65,536-row measurement cap) and the source of structural heading
+  // spans. The tree is bound to it, so the two are adopted and retired
+  // together. `content_snapshot_width` is the width it was laid out at (the
+  // viewport width in wrap mode, the natural width in scroll mode).
   std::shared_ptr<markit::LayoutSnapshot> content_snapshot =
       std::make_shared<markit::LayoutSnapshot>();
   int content_snapshot_width = -1;
+  bool content_snapshot_scroll = false;
+  uint64_t content_snapshot_document = 0;
 
   // Building the content tree re-parses the whole document, so cache it and
   // rebuild only when the display mode changes. The viewport size is
@@ -200,7 +202,6 @@ int main(int argc, char** argv) {
   // immediately (the scroller reads these refs for its layout math).
   // Declared early: the search state refresh below runs inside the content
   // renderer and reads the cached tree.
-  markit::WrapMode rendered_mode = content_cfg.horizontal_wrap;
   Element cached_content;
   Element cached_highlight;
   Element highlighted_base;
@@ -258,6 +259,11 @@ int main(int argc, char** argv) {
     bool scroll = false;
     std::string query;
     bool case_sensitive = false;
+    // Live layout prepared for this geometry: the snapshot-recording tree and
+    // the snapshot it is bound to (tree's nodes point into *snapshot, so they
+    // must be adopted and retired together). Empty on query-only revisions.
+    ftxui::Element tree;
+    std::shared_ptr<markit::LayoutSnapshot> snapshot;
     std::shared_ptr<const std::vector<std::string>> rows;
     std::shared_ptr<const markit::Re2Matcher> matcher;
     std::vector<int> matches;
@@ -269,6 +275,8 @@ int main(int argc, char** argv) {
     uint64_t layout_generation = 0;
     int viewport = -1;
     bool scroll = false;
+    ftxui::Element tree;
+    std::shared_ptr<markit::LayoutSnapshot> snapshot;
     std::shared_ptr<const std::vector<std::string>> rows;
   };
   std::optional<SearchResult> search_bg;  // guarded by search_mu.
@@ -344,28 +352,21 @@ int main(int argc, char** argv) {
     viewport_width = std::max(
         1, term_size.dimx - (nav_visible ? markit::kNavWidth + 1 : 0));
     viewport_height = std::max(1, term_size.dimy - kChromeRows);
-    if (!cached_content || rendered_mode != content_cfg.horizontal_wrap) {
-      rendered_mode = content_cfg.horizontal_wrap;
-      Element fresh = markit::RenderMarkdownRecording(
-          contents, content_cfg.theme, content_cfg.horizontal_wrap,
-          *content_snapshot);
-      cached_content =
-          is_empty_placeholder ? fresh | dim : std::move(fresh);
-      content_snapshot_width = -1;  // tree changed; recapture below.
+    // The live tree/snapshot are prepared on the worker; until the first one
+    // is adopted show a responsive shell rather than parsing here.
+    if (!cached_content) {
+      return ftxui::text("Loading\u2026") | ftxui::dim;
     }
-    // Capture the wrap-mode height from the snapshot (one layout pass, no
-    // full-height screen) and hand it to the scroller, so a tall document is
-    // no longer capped at 65,536 rows. Scroll mode has no wrapping, so the
-    // natural requirement height is already complete; the snapshot is still
-    // captured there for structural heading spans.
-    if (content_snapshot_width != viewport_width) {
-      content_snapshot->Build(cached_content, viewport_width);
-      content_snapshot_width = viewport_width;
-    }
-    if (!hscroll) {
-      wrap_height = content_snapshot->height();
-    } else {
+    // Wrap-mode height comes from the adopted snapshot when it matches the
+    // current geometry; after a resize keep the previous height until the
+    // worker adopts the re-wrapped layout (the tree itself is width
+    // independent and keeps rendering correctly).
+    if (hscroll) {
       wrap_height = -1;
+    } else if (content_snapshot_document == search_document_gen.load() &&
+               !content_snapshot_scroll &&
+               content_snapshot_width == viewport_width) {
+      wrap_height = content_snapshot->height();
     }
     // Match state is prepared by the service step before this draw; the
     // renderer only reads the already-computed row/span pointers, so no RE2
@@ -480,11 +481,17 @@ int main(int argc, char** argv) {
       search_rows_result_ready = false;
     } else if (search_result_ready && search_bg && search_bg->rows) {
       // A completed scan for the previous query still produced reusable rows.
-      // Preserve only that immutable layout result; its query/matches are
-      // stale and are intentionally discarded.
-      search_rows_bg = SearchRowsResult{
-          search_bg->document_generation, search_bg->layout_generation,
-          search_bg->viewport, search_bg->scroll, search_bg->rows};
+      // Preserve the immutable layout result (tree/snapshot/rows); its
+      // query/matches are stale and are intentionally discarded.
+      SearchRowsResult rows_result;
+      rows_result.document_generation = search_bg->document_generation;
+      rows_result.layout_generation = search_bg->layout_generation;
+      rows_result.viewport = search_bg->viewport;
+      rows_result.scroll = search_bg->scroll;
+      rows_result.tree = search_bg->tree;
+      rows_result.snapshot = search_bg->snapshot;
+      rows_result.rows = search_bg->rows;
+      search_rows_bg = std::move(rows_result);
       search_rows_result_ready = true;
     }
     search_bg.reset();
@@ -509,11 +516,9 @@ int main(int argc, char** argv) {
     const bool rows_current =
         search_rows && search_rows_valid && search_w_viewport == vw &&
         search_w_scroll == sc;
-    // A query-only revision reuses immutable rows and must not recompute the
-    // tree requirement on the UI loop. Width is ignored in that case.
-    const int width = rows_current
-                          ? std::max(1, viewport_width)
-                          : markit::SearchExtractWidth(cached_content, vw, sc);
+    // A query-only revision reuses the adopted rows; a geometry revision
+    // builds a fresh tree+snapshot on the worker (width is derived there,
+    // after the tree requirement is known).
     const std::shared_ptr<const std::vector<std::string>> input_rows =
         rows_current ? search_rows : nullptr;
     // The caller reaps any finished flight before spawning, so no join here.
@@ -521,7 +526,7 @@ int main(int argc, char** argv) {
     try {
       search_worker = std::thread(
         [&, gen, document, layout, source, worker_theme, worker_mode, vw, sc,
-         width, query, case_sensitive, input_rows] {
+         query, case_sensitive, input_rows] {
           // A flight is obsolete once its generation or layout/document
           // changes; the foreground bumps these on query/layout/shutdown.
           auto cancelled = [&] {
@@ -542,24 +547,38 @@ int main(int argc, char** argv) {
           try {
             std::shared_ptr<const std::vector<std::string>> rows = input_rows;
             if (!rows && !cancelled()) {
-              // Build a complete immutable snapshot instead of rendering
-              // bounded screen tiles: one layout pass, no 65,536-row cap and
-              // no full-height screen allocation. The tree is a pure function
-              // of the immutable source and settings, so it is safe off the
-              // foreground loop and needs no shared render guard.
-              markit::LayoutSnapshot snapshot;
-              bool aborted_build = false;
-              markit::BuildMarkdownSnapshot(*source, worker_theme, worker_mode,
-                                            width, snapshot, cancelled,
-                                            &aborted_build);
-              if (snapshot.failed()) {
-                layout_failed = true;  // checked limit exceeded; report error.
-              } else if (!aborted_build && !cancelled()) {
-                rows = std::make_shared<const std::vector<std::string>>(
-                    snapshot.TextRows());
+              // Build the live tree and its complete immutable snapshot on the
+              // worker (one parse, one layout pass, no 65,536-row cap and no
+              // full-height screen). The tree is bound to the snapshot, so
+              // they are published and adopted together; the foreground never
+              // parses or lays out.
+              auto snapshot = std::make_shared<markit::LayoutSnapshot>();
+              ftxui::Element tree = markit::RenderMarkdownRecording(
+                  *source, worker_theme, worker_mode, *snapshot, cancelled);
+              if (is_empty_placeholder) {
+                tree = tree | dim;
+              }
+              if (cancelled()) {
+                aborted = true;
+              } else {
+                const int build_width =
+                    sc ? markit::SearchExtractWidth(tree, vw, true) : vw;
+                snapshot->Build(tree, build_width, cancelled);
+                if (snapshot->failed()) {
+                  layout_failed = true;  // checked limit exceeded.
+                } else if (snapshot->cancelled() || cancelled()) {
+                  aborted = true;
+                } else {
+                  rows = std::make_shared<const std::vector<std::string>>(
+                      snapshot->TextRows());
+                  result.tree = std::move(tree);
+                  result.snapshot = std::move(snapshot);
+                }
               }
             }
-            if (cancelled()) {
+            if (aborted) {
+              // rows (if any) may be a partial extraction.
+            } else if (cancelled()) {
               aborted = true;  // rows (if any) may be a partial extraction.
             } else if (layout_failed) {
               result.error = true;
@@ -609,11 +628,17 @@ int main(int argc, char** argv) {
             } else if (!aborted && layout_current && result.rows &&
                        !result.error) {
               // The query became stale while layout work was running. Keep
-              // the immutable rows for the latest query, but never publish
-              // the stale matcher or match indices.
-              search_rows_bg = SearchRowsResult{
-                  result.document_generation, result.layout_generation,
-                  result.viewport, result.scroll, std::move(result.rows)};
+              // the immutable layout (tree/snapshot/rows) for the latest
+              // query, but never publish the stale matcher or match indices.
+              SearchRowsResult rows_result;
+              rows_result.document_generation = result.document_generation;
+              rows_result.layout_generation = result.layout_generation;
+              rows_result.viewport = result.viewport;
+              rows_result.scroll = result.scroll;
+              rows_result.tree = std::move(result.tree);
+              rows_result.snapshot = std::move(result.snapshot);
+              rows_result.rows = std::move(result.rows);
+              search_rows_bg = std::move(rows_result);
               search_rows_result_ready = true;
             }
           }
@@ -685,6 +710,58 @@ int main(int argc, char** argv) {
     }
   };
 
+  // Ensure the live layout for the current geometry is being prepared, even
+  // with no search active, so the render callback never parses or lays out.
+  // Keyed by (document revision, mode, wrap width); scroll snapshots are
+  // width-independent, so a resize there does not request new work.
+  auto ensure_layout = [&] {
+    if (viewport_width < 1 || viewport_height < 1) {
+      return;
+    }
+    const bool geometry_current =
+        cached_content && content_snapshot &&
+        content_snapshot_document == search_document_gen.load() &&
+        content_snapshot_scroll == hscroll &&
+        (hscroll || content_snapshot_width == viewport_width);
+    if (geometry_current || search_worker_running.load()) {
+      return;
+    }
+    bool ready = false;
+    {
+      std::lock_guard<std::mutex> lock(search_mu);
+      ready = search_result_ready || search_rows_result_ready;
+    }
+    if (ready) {
+      return;  // adopted by this service step.
+    }
+    spawn_search_worker();
+  };
+
+  // Adopt a worker-prepared live layout (tree + bound snapshot) when it
+  // matches the current geometry. Keyed by geometry only, not query: the same
+  // layout serves rendering, height, headings and search.
+  auto adopt_layout = [&](ftxui::Element tree,
+                          std::shared_ptr<markit::LayoutSnapshot> snapshot,
+                          uint64_t document, uint64_t layout, int viewport,
+                          bool scroll) {
+    if (!tree || !snapshot) {
+      return;
+    }
+    if (document != search_document_gen.load() ||
+        layout != search_layout_gen.load() || viewport != viewport_width ||
+        scroll != hscroll) {
+      return;  // superseded geometry.
+    }
+    cached_content = std::move(tree);
+    content_snapshot = std::move(snapshot);
+    content_snapshot_width = content_snapshot->width();
+    content_snapshot_scroll = scroll;
+    content_snapshot_document = document;
+    const int max_offset =
+        std::max(0, content_snapshot->height() - viewport_height);
+    selected = std::clamp(selected, 0, max_offset);
+  };
+
   // Adopt the worker result and refresh only the single-row highlight on the
   // loop. Matching itself is generation-guarded and never runs here.
   refresh_search_state = [&] {
@@ -704,6 +781,18 @@ int main(int argc, char** argv) {
         search_rows_bg.reset();
         search_rows_result_ready = false;
       }
+    }
+    // Adopt the live layout from either mailbox first (geometry-keyed).
+    if (rows_result) {
+      adopt_layout(rows_result->tree, rows_result->snapshot,
+                   rows_result->document_generation,
+                   rows_result->layout_generation, rows_result->viewport,
+                   rows_result->scroll);
+    }
+    if (result) {
+      adopt_layout(result->tree, result->snapshot, result->document_generation,
+                   result->layout_generation, result->viewport,
+                   result->scroll);
     }
     // The worker publishes before returning and is reaped by the service step
     // before adoption, so the immutable matcher is safe to use here and no
@@ -907,8 +996,9 @@ int main(int argc, char** argv) {
       // is left stale, including the "..." -> count/"search error" flip.
       screen.PostEvent(Event::Custom);
     }
-    // Only run worker work when a search is active: an idle viewer must not
-    // prewarm an expensive whole-document extraction.
+    // Prepare the live layout for the current geometry (idle or searching),
+    // then prewarm/extend search rows only when a search is active.
+    ensure_layout();
     if (search_open || !search_query.empty()) {
       ensure_search_rows();
     }
@@ -1199,8 +1289,9 @@ int main(int argc, char** argv) {
                                            old_is_scroll, nullptr);
       content_snapshot = std::move(next_snapshot);
       cached_content = std::move(fresh);
-      rendered_mode = content_cfg.horizontal_wrap;
       content_snapshot_width = new_width;
+      content_snapshot_scroll = hscroll;
+      content_snapshot_document = search_document_gen.load();
       wrap_height = hscroll ? -1 : content_snapshot->height();
       log("mode", hscroll ? 0 : 1, hscroll ? 1 : 0);
       return true;
