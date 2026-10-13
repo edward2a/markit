@@ -27,7 +27,9 @@ namespace {
 // Words carried from the anchor row into the fingerprint.
 constexpr int kAnchorWords = 10;
 constexpr int kMaxRenderRows = 65536;
-constexpr int kRenderChunkCellBudget = 1 << 20;
+// Default screen-tile scratch budget for the oracle extraction path. Callers
+// (tests) may pass a smaller or larger budget; extraction is independent of it.
+constexpr int kDefaultRenderChunkCellBudget = 1 << 20;
 constexpr int kMinRenderChunkRows = 64;
 constexpr int kMaxRenderChunkRows = 512;
 
@@ -165,8 +167,8 @@ int SeedCap(int min_y, int viewport_height, int ratio) {
   return std::clamp<long long>(est, 256, 65536);
 }
 
-int RenderChunkRows(int width) {
-  const int by_budget = kRenderChunkCellBudget / std::max(1, width);
+int RenderChunkRows(int width, int cell_budget) {
+  const int by_budget = cell_budget / std::max(1, width);
   return std::clamp(by_budget, kMinRenderChunkRows, kMaxRenderChunkRows);
 }
 
@@ -204,12 +206,13 @@ template <typename Callback>
 void ForEachRenderChunk(const ftxui::Element& tree, int width,
                         Callback&& callback,
                         std::recursive_mutex* render_guard = nullptr,
-                        const std::function<bool()>& cancelled = {}) {
+                        const std::function<bool()>& cancelled = {},
+                        int chunk_cell_budget = kDefaultRenderChunkCellBudget) {
   if (!tree) {
     return;
   }
 
-  const int chunk_rows = RenderChunkRows(width);
+  const int chunk_rows = RenderChunkRows(width, chunk_cell_budget);
   ftxui::Screen screen =
       ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
                             ftxui::Dimension::Fixed(chunk_rows));
@@ -263,7 +266,8 @@ void ForEachRenderChunk(const ftxui::Element& tree, int width,
 std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
                             int min_x, int viewport_height, bool may_reflow,
                             std::recursive_mutex* render_guard = nullptr,
-                            const std::function<bool()>& cancelled = {}) {
+                            const std::function<bool()>& cancelled = {},
+                            int chunk_cell_budget = kDefaultRenderChunkCellBudget) {
   const int ratio = may_reflow ? std::max(1, (min_x + width - 1) / width) : 1;
   const int reserve_rows = SeedCap(min_y, viewport_height, ratio);
   std::vector<Row> rows;
@@ -307,7 +311,7 @@ std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
         last = global_row;
       }
     }
-  }, render_guard, cancelled);
+  }, render_guard, cancelled, chunk_cell_budget);
   if (last + 1 < static_cast<int>(rows.size())) {
     rows.resize(static_cast<size_t>(last + 1));
   }
@@ -496,7 +500,8 @@ HeadingFingerprints BuildHeadingFingerprints(
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
                                         int height_hint,
                                         std::recursive_mutex* render_guard,
-                                        const std::function<bool()>& cancelled) {
+                                        const std::function<bool()>& cancelled,
+                                        int chunk_cell_budget) {
   width = std::clamp(width, 1, 8192);
   std::vector<std::string> rows;
   rows.reserve(static_cast<size_t>(std::clamp(height_hint, 1,
@@ -527,7 +532,7 @@ std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
         last = global_row;
       }
     }
-  }, render_guard, cancelled);
+  }, render_guard, cancelled, chunk_cell_budget);
   if (last + 1 < static_cast<int>(rows.size())) {
     rows.resize(static_cast<size_t>(last + 1));
   }

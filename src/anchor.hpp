@@ -62,11 +62,15 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
 // locked around each per-window FTXUI render (not the whole extraction) so a
 // background caller cannot monopolize the shared render guard. When `cancelled`
 // is set and returns true between windows the extraction stops early; callers
-// must treat an early stop as incomplete, not as a full row set.
+// must treat an early stop as incomplete, not as a full row set. The optional
+// `chunk_cell_budget` bounds each screen tile's scratch cells (width x rows);
+// it affects only scratch allocation, never the extracted rows, so callers may
+// vary it (e.g. to exercise small and large tiles).
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
                                         int height_hint,
                                         std::recursive_mutex* render_guard = nullptr,
-                                        const std::function<bool()>& cancelled = {});
+                                        const std::function<bool()>& cancelled = {},
+                                        int chunk_cell_budget = 1 << 20);
 
 // Extract width for search rows: the viewport width in wrap mode; in scroll
 // mode the tree's natural width, so clipped text is searchable while row
