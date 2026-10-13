@@ -220,8 +220,14 @@ size_t LeadingDroppedGlyphBytes(std::string_view s) {
   if (s.empty()) {
     return 0;
   }
-  // Fast path: a leading base glyph (a non-control code point of nonzero
-  // width) is never dropped, so no glyph grouping is needed.
+  // Fast path: a printable ASCII base glyph is never dropped. This avoids the
+  // Unicode width lookup for the overwhelmingly common ASCII fragments.
+  const unsigned char first_byte = static_cast<unsigned char>(s.front());
+  if (first_byte >= 0x20 && first_byte < 0x7F) {
+    return 0;
+  }
+  // A leading base glyph (a non-control code point of nonzero width) is never
+  // dropped, so no glyph grouping is needed.
   uint32_t cp = 0;
   size_t len = 0;
   if (DecodeUtf8(s, 0, &cp, &len) && !IsControlCodePoint(cp) &&
@@ -801,6 +807,19 @@ class Renderer {
   // behavior. This is the focused combining-sequence scope, not full
   // extended-grapheme support.
   void CoalesceCombiningUnits(std::vector<Fragment>& fragments) {
+    // Fast path: when every fragment is non-empty and none begins with a
+    // dropped glyph (the common ASCII case), there is nothing to coalesce;
+    // skip the copy so inline flattening does not allocate a new vector.
+    bool needs_coalesce = false;
+    for (const Fragment& frag : fragments) {
+      if (frag.text.empty() || LeadingDroppedGlyphBytes(frag.text) > 0) {
+        needs_coalesce = true;
+        break;
+      }
+    }
+    if (!needs_coalesce) {
+      return;
+    }
     std::vector<Fragment> out;
     out.reserve(fragments.size());
     for (auto& frag : fragments) {
