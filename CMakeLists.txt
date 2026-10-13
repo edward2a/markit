@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.11)
+cmake_minimum_required(VERSION 3.22)
 project(markit LANGUAGES CXX)
 
 function(markit_changelog_version CONTENT OUT_VAR)
@@ -213,6 +213,8 @@ add_library(markit_core STATIC
   src/anchor.cpp
   src/config.cpp
   src/search.cpp
+  src/entity_decode.cpp
+  src/layout_snapshot.cpp
 )
 target_include_directories(markit_core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -223,13 +225,15 @@ target_link_libraries(markit_core
   PUBLIC ftxui::dom
   PUBLIC ftxui::screen
   PRIVATE md4c
+  PRIVATE md4c-html
   PRIVATE yaml-cpp
   PRIVATE re2::re2
 )
 
 if (MARKIT_BUILD_PUBLIC_HEADER_CHECKS)
   set(_markit_public_headers
-      config display keybindings theme markdown chrome scroller anchor search)
+      config display keybindings theme markdown chrome scroller anchor search
+      layout_snapshot)
   foreach (_markit_header IN LISTS _markit_public_headers)
     set(_markit_header_source
         "${CMAKE_CURRENT_BINARY_DIR}/markit_header_${_markit_header}.cpp")
@@ -263,6 +267,15 @@ if (MARKIT_BUILD_TESTS)
     PASS_REGULAR_EXPRESSION "markit ${_markit_version_string}"
   )
 
+  # A directory argument must be rejected with a path-specific error, not an
+  # uncaught read exception that aborts the process (which would not match).
+  add_test(NAME markit-directory-input
+    COMMAND markit "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  )
+  set_tests_properties(markit-directory-input PROPERTIES
+    PASS_REGULAR_EXPRESSION "is a directory"
+  )
+
   if (NOT BUILD_SHARED_LIBS)
     include(${ftxui_SOURCE_DIR}/cmake/ftxui_find_google_test.cmake)
 
@@ -273,6 +286,8 @@ if (MARKIT_BUILD_TESTS)
       src/anchor_test.cpp
       src/config_test.cpp
       src/search_test.cpp
+      src/entity_decode_test.cpp
+      src/layout_snapshot_test.cpp
     )
     target_link_libraries(markit-tests
       PRIVATE markit_core

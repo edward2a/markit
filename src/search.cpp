@@ -59,12 +59,16 @@ std::vector<std::pair<int, int>> Re2Matcher::FindSpans(
 }
 
 std::vector<int> FindMatches(const std::vector<std::string>& rows,
-                             const Matcher& matcher) {
+                             const Matcher& matcher,
+                             const std::function<bool()>& cancelled) {
   std::vector<int> out;
   if (!matcher.ok()) {
     return out;
   }
   for (size_t i = 0; i < rows.size(); ++i) {
+    if (cancelled && cancelled()) {
+      break;  // incomplete: caller must not treat this as a full scan.
+    }
     if (matcher.Matches(rows[i])) {
       out.push_back(static_cast<int>(i));
     }

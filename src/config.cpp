@@ -1,5 +1,6 @@
 #include "config.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
@@ -423,11 +424,15 @@ const KeyBindingActionDef kKeyBindingActions[] = {
 // filling `out` (pre-seeded with defaults) with the actions found.
 // Specifying an action replaces its whole default list; an empty list unbinds
 // it. Unknown actions, non-list values, non-scalar items, and unknown key
-// names throw std::runtime_error with a dotted path. So does a key claimed by
-// two actions in the same evaluation context (content, nav, or prompt):
-// modal overlaps across contexts (Esc cancel/quit, Enter accept/activate,
-// the scroll keys shared with nav) are allowed by design and resolved by
-// event-chain precedence.
+// names throw std::runtime_error with a dotted path.
+//
+// Every override is parsed first, then conflicts are checked against the
+// final effective map. That makes the result independent of YAML order and
+// lets valid swaps (each key still bound to exactly one action) load, while a
+// key claimed by two actions in the same context (content, nav, or prompt)
+// still fails. Modal overlaps across contexts (Esc cancel/quit, Enter
+// accept/activate, the scroll keys shared with nav) are allowed by design and
+// resolved by event-chain precedence.
 void ValidateKeybindings(const YAML::Node& node, KeyBindings& out) {
 
   if (!node.IsMap()) {
@@ -441,16 +446,10 @@ void ValidateKeybindings(const YAML::Node& node, KeyBindings& out) {
     by_name[def.action] = &def;
   }
 
-  // Seed the ownership map with the defaults so a remap colliding with
-  // another action's (default or configured) keys fails fast. Keyed by
-  // context group + canonical name; modal cross-context sharing is allowed.
-  std::unordered_map<std::string, std::string> owner;  // group+key -> action
-  for (const auto& def : kKeyBindingActions) {
-    for (const char* key : def.defaults) {
-      owner[std::to_string(def.group) + '\0' + key] = def.action;
-    }
-  }
-
+  // Phase 1: parse every override and canonicalize its keys, deduping within
+  // one action's list. Conflicts are deferred so a key may legitimately move
+  // from one action to another.
+  std::unordered_map<std::string, std::vector<std::string>> overrides;
   for (auto it = node.begin(); it != node.end(); ++it) {
     if (!it->first.IsScalar()) {
       throw std::runtime_error("config: keybindings: expected string keys");
@@ -466,22 +465,12 @@ void ValidateKeybindings(const YAML::Node& node, KeyBindings& out) {
                                ": unknown action (expected one of: " + known +
                                ")");
     }
-    const KeyBindingActionDef& def = *found->second;
     const YAML::Node value = it->second;
     if (!value.IsSequence()) {
       throw std::runtime_error("config: keybindings." + action +
                                ": expected a list of key names");
     }
-    // Release this action's previous claims (defaults or an earlier entry)
-    // before claiming the replacement list.
-    for (auto o = owner.begin(); o != owner.end();) {
-      if (o->second == action) {
-        o = owner.erase(o);
-      } else {
-        ++o;
-      }
-    }
-    std::vector<ftxui::Event> keys;
+    std::vector<std::string> keys;
     int index = 0;
     for (auto k = value.begin(); k != value.end(); ++k, ++index) {
       if (!k->IsScalar()) {
@@ -498,19 +487,62 @@ void ValidateKeybindings(const YAML::Node& node, KeyBindings& out) {
             "' (expected a special key name, ctrl+<letter>, or a single "
             "printable character)");
       }
-      const std::string claim =
-          std::to_string(def.group) + '\0' + *canonical;
+      if (std::find(keys.begin(), keys.end(), *canonical) != keys.end()) {
+        continue;  // repeated within one list: harmless, dedupe.
+      }
+      keys.push_back(*canonical);
+    }
+    overrides[action] = std::move(keys);
+  }
+
+  // Phase 2: assemble the final effective list per action (an override
+  // replaces the whole default list) and reject a key claimed by two actions
+  // in the same context. Keyed by context group + canonical name; modal
+  // cross-context sharing is allowed. When a conflict involves an overriding
+  // action and an unchanged default, name the override as the subject so the
+  // error reads as the user's change colliding with the other binding.
+  std::unordered_map<std::string, std::string> owner;  // group+key -> action
+  for (const auto& def : kKeyBindingActions) {
+    const auto override_it = overrides.find(def.action);
+    std::vector<std::string> keys;
+    if (override_it != overrides.end()) {
+      keys = override_it->second;
+    } else {
+      for (const char* key : def.defaults) {
+        keys.emplace_back(key);
+      }
+    }
+    for (const std::string& key : keys) {
+      const std::string claim = std::to_string(def.group) + '\0' + key;
       const auto taken = owner.find(claim);
       if (taken != owner.end()) {
-        if (taken->second == action) {
-          continue;  // repeated within one list: harmless, dedupe.
+        const bool claimant_override = override_it != overrides.end();
+        const bool holder_override = overrides.count(taken->second) != 0;
+        std::string subject = def.action;
+        std::string other = taken->second;
+        if (holder_override && !claimant_override) {
+          std::swap(subject, other);
         }
         throw std::runtime_error(
-            "config: keybindings." + action + "[" + std::to_string(index) +
-            "]: key '" + raw + "' is already bound to '" + taken->second + "'");
+            "config: keybindings." + subject + ": key '" + key +
+            "' is already bound to '" + other + "'");
       }
-      owner[claim] = action;
-      keys.push_back(KeyEventForCanonical(*canonical));
+      owner[claim] = def.action;
+    }
+  }
+
+  // Phase 3: build the events from the final lists.
+  for (const auto& def : kKeyBindingActions) {
+    const auto override_it = overrides.find(def.action);
+    std::vector<ftxui::Event> keys;
+    if (override_it != overrides.end()) {
+      for (const std::string& key : override_it->second) {
+        keys.push_back(KeyEventForCanonical(key));
+      }
+    } else {
+      for (const char* key : def.defaults) {
+        keys.push_back(KeyEventForCanonical(key));
+      }
     }
     out.*(def.member) = std::move(keys);
   }

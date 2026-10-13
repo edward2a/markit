@@ -1,10 +1,13 @@
 // Implementation of the screen chrome builders. See chrome.hpp.
 #include "chrome.hpp"
 
+#include "entity_decode.hpp"
+
 #include <md4c.h>
 
 #include <algorithm>  // for clamp, max
 #include <string>  // for string, to_string
+#include <string_view>  // for string_view
 #include <utility>  // for pair
 
 #include <ftxui/dom/node.hpp>  // for Node, Render
@@ -68,11 +71,18 @@ class HeadingCollector {
                            void* /*userdata*/) {
     return 0;
   }
-  static int cb_text(MD_TEXTTYPE /*type*/, const MD_CHAR* text, MD_SIZE size,
+  static int cb_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size,
                      void* userdata) {
     auto* self = static_cast<HeadingCollector*>(userdata);
     if (self->level_ > 0) {
-      self->current_.append(text, size);
+      // Decode typed entity references exactly once so the outline matches the
+      // displayed heading text; code/literal text is never rescanned.
+      if (type == MD_TEXT_ENTITY) {
+        self->current_ +=
+            markit::DecodeEntityForDisplay(std::string_view(text, size));
+      } else {
+        self->current_.append(text, size);
+      }
     }
     return 0;
   }

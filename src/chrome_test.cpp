@@ -123,6 +123,16 @@ TEST(Chrome, ExtractHeadingsEmptyWhenNone) {
   EXPECT_TRUE(markit::ExtractHeadings("").empty());
 }
 
+// Entity references in a heading decode to the same text the renderer shows,
+// so outline fingerprints match the displayed heading; code spans stay literal.
+TEST(Chrome, ExtractHeadingsDecodesEntities) {
+  const std::vector<markit::Heading> headings =
+      markit::ExtractHeadings("# A &amp; B\n\n## `&amp;`\n");
+  ASSERT_EQ(headings.size(), 2u);
+  EXPECT_EQ(headings[0].text, "A & B");
+  EXPECT_EQ(headings[1].text, "&amp;");
+}
+
 // Position formatting: current/total, rounded percent, mode name.
 TEST(Chrome, FormatPosition) {
   using markit::WrapMode;

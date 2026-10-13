@@ -15,12 +15,23 @@
 
 #include "scroller.hpp"
 #include "config.hpp"
+#include "layout_snapshot.hpp"
 #include "markdown.hpp"
 
 namespace {
 
 constexpr int kWidth = 20;
 constexpr int kHeight = 8;   // viewport height H
+
+// Wrapped content height at `width`, computed from the document layout
+// snapshot exactly as the app does before driving the scroller.
+int SnapshotWrapHeight(const std::string& markdown, const markit::Config& cfg,
+                       int width) {
+  markit::LayoutSnapshot snapshot;
+  markit::BuildMarkdownSnapshot(markdown, cfg.theme, cfg.horizontal_wrap, width,
+                                snapshot);
+  return snapshot.height();
+}
 
 // Build a component that renders `n` single-row text lines.
 ftxui::Component MakeLines(int n) {
@@ -337,10 +348,12 @@ TEST(Scroller, WrapModeReflowsLongCodeLines) {
   int viewport_width = kWidth;
   bool hscroll = false;
   markit::Config cfg;
+  int wrap_height = SnapshotWrapHeight(md, cfg, kWidth);
   auto scroller = ftxui::Scroller(
       ftxui::Renderer(
           [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
-      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll,
+      nullptr, &wrap_height);
   Prime(scroller);
   EXPECT_GT(VisibleRows(scroller), 3);
 }
@@ -361,20 +374,24 @@ TEST(Scroller, WrapSurvivesModeToggleAtSameWidth) {
   int viewport_width = kWidth;
   bool hscroll = false;
   markit::Config cfg;
+  int wrap_height = SnapshotWrapHeight(md, cfg, kWidth);
   auto scroller = ftxui::Scroller(
       ftxui::Renderer(
           [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
-      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll,
+      nullptr, &wrap_height);
   Prime(scroller);
   const int wrap_rows = VisibleRows(scroller);
   ASSERT_GT(wrap_rows, 3);
 
   hscroll = true;  // scroll mode: single wide rows.
   cfg.horizontal_wrap = markit::WrapMode::Scroll;
+  wrap_height = -1;
   Prime(scroller);
 
   hscroll = false;  // back to wrap at the same width.
   cfg.horizontal_wrap = markit::WrapMode::Wrap;
+  wrap_height = SnapshotWrapHeight(md, cfg, kWidth);
   Prime(scroller);
   EXPECT_EQ(VisibleRows(scroller), wrap_rows);
 
@@ -433,12 +450,15 @@ TEST(Scroller, WrapAdaptsToViewportWidthChange) {
   int viewport_width = 72;
   bool hscroll = false;
   markit::Config cfg;
+  int wrap_height = SnapshotWrapHeight(md, cfg, 72);
   auto scroller = ftxui::Scroller(
       ftxui::Renderer(
           [&md, &cfg] { return markit::RenderMarkdown(md, cfg); }),
-      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll);
+      &selected, &viewport_height, {}, &selected_x, &viewport_width, &hscroll,
+      nullptr, &wrap_height);
   auto first_row = [&](int w) {
     viewport_width = w;
+    wrap_height = SnapshotWrapHeight(md, cfg, w);
     ftxui::Screen screen(w, 72);
     ftxui::Render(screen, scroller->Render());
     std::string row;
@@ -455,20 +475,45 @@ TEST(Scroller, WrapAdaptsToViewportWidthChange) {
       << "widening again restores the single-row layout";
 }
 
-// A matching pre-measured wrap hint is adopted instead of measuring, and the
-// hint is consumed.
-TEST(Scroller, WrapHintAdoptedWhenWidthsMatch) {
+// A caller-supplied wrap height is consumed directly, so a snapshot height
+// beyond any screen cap is honoured without measurement.
+TEST(Scroller, WrapHeightOverrideAdopted) {
   int selected = 0;
   int viewport = kHeight;
-  int hint_w = kWidth;
-  int hint_h = 37;
+  int wrap_height = 37;
   int content_height = -1;
   auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport, {}, 0,
-                                  kWidth, false, &content_height, &hint_w,
-                                  &hint_h);
+                                  kWidth, false, &content_height, &wrap_height);
   Prime(scroller);
   EXPECT_EQ(content_height, 37);
-  EXPECT_EQ(hint_w, -1);
+}
+
+// Without an override the scroller falls back to the unwrapped requirement,
+// which is exact for content that does not reflow.
+TEST(Scroller, WrapHeightFallsBackToNatural) {
+  int selected = 0;
+  int viewport = kHeight;
+  int wrap_height = -1;
+  int content_height = -1;
+  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport, {}, 0,
+                                  kWidth, false, &content_height, &wrap_height);
+  Prime(scroller);
+  EXPECT_EQ(content_height, 60);
+}
+
+// The override is authoritative with no cap: a height past the old 65,536-row
+// measurement limit is scrolled to directly.
+TEST(Scroller, WrapHeightOverrideHasNoCap) {
+  int selected = 0;
+  int viewport = kHeight;
+  int wrap_height = 100000;
+  int content_height = -1;
+  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport, {}, 0,
+                                  kWidth, false, &content_height, &wrap_height);
+  Prime(scroller);
+  EXPECT_EQ(content_height, 100000);
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::End));
+  EXPECT_EQ(selected, 100000 - kHeight);
 }
 
 // At End the viewport's bottom row shows the last content line: the frame
@@ -511,27 +556,11 @@ TEST(Scroller, EndShowsLastLineAtBottomRow) {
   }
 }
 
-// A hint for another width is ignored: the height is measured normally and
-// the stale hint is kept for a later resize back.
-TEST(Scroller, WrapHintIgnoredOnWidthMismatch) {
-  int selected = 0;
-  int viewport = kHeight;
-  int hint_w = kWidth + 1;
-  int hint_h = 37;
-  int content_height = -1;
-  auto scroller = ftxui::Scroller(MakeLines(60), &selected, &viewport, {}, 0,
-                                  kWidth, false, &content_height, &hint_w,
-                                  &hint_h);
-  Prime(scroller);
-  EXPECT_EQ(content_height, 60);
-  EXPECT_EQ(hint_w, kWidth + 1);
-}
-
 // Wrap a child in a Scroller driven by explicit key bindings.
 ftxui::Component BoundScroller(ftxui::Component child, int* selected,
                                int* viewport, const markit::KeyBindings* kb) {
   return ftxui::Scroller(std::move(child), selected, viewport,
-                         [](int, int) {}, 0, kWidth, false, nullptr, -1, -1,
+                         [](int, int) {}, 0, kWidth, false, nullptr, -1,
                          kb);
 }
 

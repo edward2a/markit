@@ -165,6 +165,15 @@ def main():
               "pattern" not in status(),
               ("row %d " % pr if pr >= 0 else "") + status())
 
+        # An open prompt owns former shortcuts: q must not quit and w must not
+        # toggle the display mode; both become query input.
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"q")
+        check("q types into the open prompt instead of quitting",
+              prompt_row(ch) >= 0 and mode in status(), status())
+        raw, ch, fg, bg, bo, inv = ses.frame(keys=b"w")
+        check("w types into the open prompt instead of toggling",
+              prompt_row(ch) >= 0 and mode in status(), status())
+
         raw, ch, fg, bg, bo, inv = ses.frame(keys=b"[")
         if show:
             dump("invalid", ch)

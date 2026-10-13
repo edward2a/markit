@@ -703,6 +703,137 @@ TEST(Markdown, Link) {
   EXPECT_TRUE(AnyLineContains(rows, "click me"));
 }
 
+// A valid non-ASCII link destination is preserved as an OSC 8 target.
+TEST(Markdown, LinkKeepsValidUnicodeDestination) {
+  const std::string url = "https://example.test/\u00e9";
+  ftxui::Screen screen(60, 10);
+  ftxui::Render(screen, markit::RenderMarkdown("[x](" + url + ")\n"));
+  bool found = false;
+  for (int y = 0; y < screen.dimy() && !found; ++y) {
+    for (int x = 0; x < screen.dimx(); ++x) {
+      const auto id = screen.CellAt(x, y).hyperlink;
+      if (id != 0 && screen.Hyperlink(id) == url) {
+        found = true;
+        break;
+      }
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+// A malformed UTF-8 destination must not become an OSC 8 target; the label
+// text and link styling are retained.
+TEST(Markdown, LinkRejectsMalformedUtf8Destination) {
+  const std::string md = "<a href=\"https://a.test/\xff\">click</a>\n";
+  ftxui::Screen screen(60, 10);
+  ftxui::Render(screen, markit::RenderMarkdown(md));
+  EXPECT_TRUE(AnyLineContains(RenderLines(md), "click"));
+  for (int y = 0; y < screen.dimy(); ++y) {
+    for (int x = 0; x < screen.dimx(); ++x) {
+      EXPECT_EQ(screen.CellAt(x, y).hyperlink, 0);
+    }
+  }
+  EXPECT_EQ(screen.ToString().find("\x1b]8;;"), std::string::npos);
+}
+
+// A control code point in the destination (here a raw ESC byte in an HTML
+// attribute) must not reach the terminal inside an OSC 8 URL.
+TEST(Markdown, LinkRejectsControlDestination) {
+  const std::string md = "<a href=\"https://a.test/\x1b]8;;evil\">click</a>\n";
+  ftxui::Screen screen(80, 10);
+  ftxui::Render(screen, markit::RenderMarkdown(md));
+  EXPECT_EQ(screen.ToString().find("evil"), std::string::npos);
+  for (int y = 0; y < screen.dimy(); ++y) {
+    for (int x = 0; x < screen.dimx(); ++x) {
+      EXPECT_EQ(screen.CellAt(x, y).hyperlink, 0);
+    }
+  }
+}
+
+// A UTF-8-encoded surrogate (U+D800 = ED A0 80) is not valid UTF-8 and must
+// not become a hyperlink target, in Markdown or interpreted HTML.
+TEST(Markdown, LinkRejectsSurrogateUtf8Destination) {
+  const std::string surrogate = "\xED\xA0\x80";
+  for (const std::string& md :
+       {std::string("[x](https://a.test/") + surrogate + ")\n",
+        std::string("<a href=\"https://a.test/") + surrogate + "\">x</a>\n"}) {
+    ftxui::Screen screen(60, 6);
+    ftxui::Render(screen, markit::RenderMarkdown(md));
+    for (int y = 0; y < screen.dimy(); ++y) {
+      for (int x = 0; x < screen.dimx(); ++x) {
+        EXPECT_EQ(screen.CellAt(x, y).hyperlink, 0);
+      }
+    }
+  }
+}
+
+// Entity references in Markdown text decode exactly once.
+TEST(Markdown, EntityDecodedInText) {
+  auto rows = RenderLines("A &amp; B\n");
+  EXPECT_TRUE(AnyLineContains(rows, "A & B"));
+}
+
+TEST(Markdown, EntityNotDoubleDecoded) {
+  auto rows = RenderLines("&amp;amp;\n");
+  EXPECT_TRUE(AnyLineContains(rows, "&amp;"));
+  EXPECT_FALSE(AnyLineContains(rows, "&&"));
+}
+
+// Markdown code spans stay literal: entity spellings are not decoded.
+TEST(Markdown, EntityInCodePreserved) {
+  auto rows = RenderLines("`&amp;`\n");
+  EXPECT_TRUE(AnyLineContains(rows, "&amp;"));
+}
+
+// An escaped ampersand is ordinary text, not an entity.
+TEST(Markdown, EntityEscapedLiteralPreserved) {
+  auto rows = RenderLines("\\&amp;\n");
+  EXPECT_TRUE(AnyLineContains(rows, "&amp;"));
+}
+
+// A decoded entity becomes the hyperlink destination.
+TEST(Markdown, LinkDestinationEntityDecoded) {
+  const std::string url = "https://a.test/&b";
+  ftxui::Screen screen(60, 6);
+  ftxui::Render(screen, markit::RenderMarkdown("[x](https://a.test/&amp;b)\n"));
+  bool found = false;
+  for (int y = 0; y < screen.dimy() && !found; ++y) {
+    for (int x = 0; x < screen.dimx(); ++x) {
+      const auto id = screen.CellAt(x, y).hyperlink;
+      if (id != 0 && screen.Hyperlink(id) == url) {
+        found = true;
+        break;
+      }
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+// An entity-encoded control in a destination disables the OSC 8 hyperlink.
+TEST(Markdown, LinkDestinationEncodedControlRejected) {
+  ftxui::Screen screen(60, 6);
+  ftxui::Render(screen,
+                markit::RenderMarkdown("[x](https://a.test/&#27;)\n"));
+  for (int y = 0; y < screen.dimy(); ++y) {
+    for (int x = 0; x < screen.dimx(); ++x) {
+      EXPECT_EQ(screen.CellAt(x, y).hyperlink, 0);
+    }
+  }
+  EXPECT_EQ(screen.ToString().find("\x1b]8;;"), std::string::npos);
+}
+
+// An entity-encoded invalid scalar also disables the hyperlink.
+TEST(Markdown, LinkDestinationInvalidScalarRejected) {
+  ftxui::Screen screen(60, 6);
+  ftxui::Render(screen,
+                markit::RenderMarkdown("[x](https://a.test/&#xD800;)\n"));
+  for (int y = 0; y < screen.dimy(); ++y) {
+    for (int x = 0; x < screen.dimx(); ++x) {
+      EXPECT_EQ(screen.CellAt(x, y).hyperlink, 0);
+    }
+  }
+}
+
 // Horizontal rules are emitted as separators (no crash, some content present).
 TEST(Markdown, HorizontalRule) {
   auto rows = RenderLines("above\n\n---\n\nbelow\n");
@@ -802,6 +933,200 @@ TEST(Markdown, WrapPreservesStyledText) {
   for (const auto& l : lines) {
     EXPECT_LE(l.size(), 20u) << "row exceeds viewport width";
   }
+}
+
+// Regression: a word that fits the viewport must not be clipped because the
+// inter-word separator was charged against it at the wrap edge. At width 4,
+// "a bbbb" must wrap to "a" / "bbbb", not "a" / " bbb".
+TEST(Markdown, WrapSeparatorDoesNotClipFittingWord) {
+  auto lines = TrimmedLines(RenderLines("a bbbb\n", {}, 4, 20));
+  bool has_a = false;
+  bool has_bbbb = false;
+  for (const auto& l : lines) {
+    if (l == "a") {
+      has_a = true;
+    }
+    if (l == "bbbb") {
+      has_bbbb = true;
+    }
+  }
+  EXPECT_TRUE(has_a) << "first word missing";
+  EXPECT_TRUE(has_bbbb) << "fitting word was clipped at the wrap edge";
+}
+
+// A combining mark decoded from an entity arrives as its own fragment; it must
+// stay attached to its base instead of being dropped by the renderer, in both
+// display modes.
+TEST(Markdown, CombiningEntityStaysWithBase) {
+  const std::string md = "a&#x301;b\n";  // "a" + combining acute + "b"
+  for (markit::WrapMode mode :
+       {markit::WrapMode::Wrap, markit::WrapMode::Scroll}) {
+    markit::Config cfg;
+    cfg.horizontal_wrap = mode;
+    ftxui::Screen screen(20, 4);
+    ftxui::Render(screen, markit::RenderMarkdown(md, cfg));
+    bool attached = false;
+    for (int c = 0; c < screen.dimx(); ++c) {
+      if (screen.CellAt(c, 0).character == "a\u0301") {
+        attached = true;
+      }
+    }
+    EXPECT_TRUE(attached) << "combining mark was dropped or split from base";
+    EXPECT_NE(screen.ToString().find("a\u0301"), std::string::npos)
+        << "serialized output lost the base-plus-mark unit";
+  }
+}
+
+// A combining mark whose own fragment is plain must not override the base's
+// style: the whole base-plus-marks unit is bold because the base is bold.
+TEST(Markdown, CombiningMarkKeepsBaseStyle) {
+  ftxui::Screen screen(20, 4);
+  ftxui::Render(screen, markit::RenderMarkdown("**a**&#x301;\n"));
+  bool found = false;
+  for (int c = 0; c < screen.dimx(); ++c) {
+    const auto& cell = screen.CellAt(c, 0);
+    if (cell.character == "a\u0301") {
+      found = true;
+      EXPECT_TRUE(cell.bold) << "mark did not inherit the base's style";
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+// A combining mark after a link keeps the base's hyperlink on the whole unit.
+TEST(Markdown, CombiningMarkKeepsBaseHyperlink) {
+  const std::string url = "https://example.test/x";
+  ftxui::Screen screen(60, 4);
+  ftxui::Render(screen,
+                markit::RenderMarkdown("[a](" + url + ")&#x301;\n"));
+  bool found = false;
+  for (int c = 0; c < screen.dimx(); ++c) {
+    const auto& cell = screen.CellAt(c, 0);
+    if (cell.character == "a\u0301") {
+      found = true;
+      ASSERT_NE(cell.hyperlink, 0);
+      EXPECT_EQ(screen.Hyperlink(cell.hyperlink), url);
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+// A wide base keeps its combining mark in a table cell (non-wrap path).
+TEST(Markdown, CombiningMarkOnWideBaseInTableCell) {
+  const std::string md = "| c |\n|---|\n| \u6d4b&#x301; |\n";
+  ftxui::Screen screen(40, 10);
+  ftxui::Render(screen, markit::RenderMarkdown(md));
+  bool found = false;
+  for (int y = 0; y < screen.dimy(); ++y) {
+    for (int x = 0; x < screen.dimx(); ++x) {
+      if (screen.CellAt(x, y).character == "\u6d4b\u0301") {
+        found = true;
+      }
+    }
+  }
+  EXPECT_TRUE(found) << "wide base lost its combining mark in a table cell";
+}
+
+// A wide base keeps its combining mark in its leading cell (with an empty
+// continuation) in both display modes, not in the continuation cell.
+TEST(Markdown, CombiningMarkOnWideBaseKeepsLeadingCell) {
+  const std::string md = "\u6d4b&#x301;\n";
+  for (markit::WrapMode mode :
+       {markit::WrapMode::Wrap, markit::WrapMode::Scroll}) {
+    markit::Config cfg;
+    cfg.horizontal_wrap = mode;
+    ftxui::Screen screen(20, 4);
+    ftxui::Render(screen, markit::RenderMarkdown(md, cfg));
+    int base_col = -1;
+    for (int c = 0; c < screen.dimx(); ++c) {
+      if (screen.CellAt(c, 0).character == "\u6d4b\u0301") {
+        base_col = c;
+      }
+    }
+    ASSERT_GE(base_col, 0) << "wide base+mark unit missing";
+    EXPECT_EQ(screen.CellAt(base_col + 1, 0).character, "")
+        << "continuation cell must stay empty";
+  }
+}
+
+// Code tabs expand to four-display-column stops measured from logical column
+// zero of the source line (the border does not count).
+TEST(Markdown, CodeTabExpandsToFourColumnStops) {
+  ftxui::Screen screen(40, 8);
+  ftxui::Render(screen, markit::RenderMarkdown("```\nab\tc\n```\n", {}));
+  int ar = -1, ac = -1, br = -1, bc = -1;
+  for (int r = 0; r < 8; ++r) {
+    for (int c = 0; c < 40; ++c) {
+      const std::string& ch = screen.CellAt(c, r).character;
+      if (ch == "a" && ac < 0) {
+        ar = r;
+        ac = c;
+      }
+      if (ch == "c") {
+        br = r;
+        bc = c;
+      }
+    }
+  }
+  ASSERT_GE(ac, 0);
+  ASSERT_GE(bc, 0);
+  EXPECT_EQ(ar, br);
+  EXPECT_EQ(bc - ac, 4);  // "ab" is 2 columns, tab advances to column 4.
+}
+
+// Tab stops count display columns, so a wide glyph advances the column by two.
+TEST(Markdown, CodeTabStopCountsWideGlyphs) {
+  ftxui::Screen screen(40, 8);
+  ftxui::Render(screen, markit::RenderMarkdown("```\n\u6d4b\tc\n```\n", {}));
+  int ac = -1, bc = -1;
+  for (int r = 0; r < 8; ++r) {
+    for (int c = 0; c < 40; ++c) {
+      const std::string& ch = screen.CellAt(c, r).character;
+      if (ch == "\u6d4b" && ac < 0) {
+        ac = c;
+      }
+      if (ch == "c") {
+        bc = c;
+      }
+    }
+  }
+  ASSERT_GE(ac, 0);
+  ASSERT_GE(bc, 0);
+  // The wide glyph is 2 columns, so the tab advances from column 2 to column 4.
+  EXPECT_EQ(bc - ac, 4);
+}
+
+// Regression: a fitting code token must not be clipped because the inter-word
+// separator was charged against it at the wrap edge. At content width 4,
+// "a bbbb" must wrap to "a" / "bbbb".
+TEST(Markdown, CodeWrapSeparatorDoesNotClipFittingWord) {
+  auto lines = TrimmedLines(RenderLines("```\na bbbb\n```\n", {}, 6, 12));
+  bool has_bbbb = false;
+  for (const auto& l : lines) {
+    if (l.find("bbbb") != std::string::npos) {
+      has_bbbb = true;
+    }
+  }
+  EXPECT_TRUE(has_bbbb) << "fitting code word was clipped at the wrap edge";
+}
+
+// Inline code expands tabs the same way.
+TEST(Markdown, InlineCodeTabExpandsToFourColumnStops) {
+  ftxui::Screen screen(40, 4);
+  ftxui::Render(screen, markit::RenderMarkdown("`a\tb`\n", {}));
+  int ac = -1, bc = -1;
+  for (int c = 0; c < 40; ++c) {
+    const std::string& ch = screen.CellAt(c, 0).character;
+    if (ch == "a" && ac < 0) {
+      ac = c;
+    }
+    if (ch == "b") {
+      bc = c;
+    }
+  }
+  ASSERT_GE(ac, 0);
+  ASSERT_GE(bc, 0);
+  EXPECT_EQ(bc - ac, 4);
 }
 
 // Regression: the inter-word whitespace before a link stays plain in wrap

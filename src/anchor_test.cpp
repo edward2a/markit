@@ -772,6 +772,40 @@ TEST(Anchor, RenderTextRowsPreservesChunkBoundaries) {
   }
 }
 
+// The screen-tile cell budget bounds scratch allocation only: extraction must
+// be independent of it. Exercise the same tall fixtures at the plan's small
+// (16,384-cell) and large (65,536-cell) budgets, whose tile row counts differ,
+// and require byte-identical rows across the chunk boundaries.
+TEST(Anchor, RenderTextRowsTileBudgetInvariant) {
+  constexpr int kSmallTileCells = 1 << 14;  // 16,384
+  constexpr int kLargeTileCells = 1 << 16;  // 65,536
+  std::string doc;
+  for (int i = 0; i < 700; ++i) {
+    doc += "paragraph " + std::to_string(i) +
+           " has enough words to exercise the wrapped row layout\n\n";
+  }
+  auto wrap_tree = markit::RenderMarkdown(doc, WrapCfg());
+  const auto wrap_small =
+      markit::RenderTextRows(wrap_tree, kWidth, 1, nullptr, {}, kSmallTileCells);
+  const auto wrap_large =
+      markit::RenderTextRows(wrap_tree, kWidth, 1, nullptr, {}, kLargeTileCells);
+  ASSERT_FALSE(wrap_small.empty());
+  ASSERT_EQ(wrap_small.size(), wrap_large.size());
+  for (size_t i = 0; i < wrap_small.size(); ++i) {
+    EXPECT_EQ(wrap_small[i], wrap_large[i]) << "wrap row " << i;
+  }
+
+  auto scroll_tree = markit::RenderMarkdown(doc, ScrollCfg());
+  const auto scroll_small =
+      markit::RenderTextRows(scroll_tree, 400, 1, nullptr, {}, kSmallTileCells);
+  const auto scroll_large =
+      markit::RenderTextRows(scroll_tree, 400, 1, nullptr, {}, kLargeTileCells);
+  ASSERT_EQ(scroll_small.size(), scroll_large.size());
+  for (size_t i = 0; i < scroll_small.size(); ++i) {
+    EXPECT_EQ(scroll_small[i], scroll_large[i]) << "scroll row " << i;
+  }
+}
+
 // Scroll rows keep their identity when extraction crosses a chunk and a wide
 // render still exposes text beyond the viewport clip.
 TEST(Anchor, RenderTextRowsWideScrollPreservesRowsAcrossChunks) {

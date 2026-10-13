@@ -14,7 +14,6 @@
 #include <ftxui/dom/elements.hpp>  // for operator|, Element, focusPositionRelative, yframe, yflex
 #include <ftxui/dom/node.hpp>      // for Node
 #include <ftxui/dom/requirement.hpp>  // for Requirement
-#include <ftxui/screen/screen.hpp>    // for Screen, Dimension
 
 #include "keybindings.hpp"  // for markit::KeyBindings, MatchesKey
 
@@ -29,47 +28,13 @@ const markit::KeyBindings& DefaultKeyBindings() {
   return kDefaults;
 }
 
-// Renders a width-constrained element into a tall screen and returns the last
-// row index with visible content (querying the full width, so trailing
-// padding doesn't count). Used in wrap mode where the wrapped height is only
-// known after a constrained layout. `seed_cap` is a lower bound for the
-// height (the unwrapped requirement): starting there avoids re-rendering
-// through several growth steps for long documents.
-int MeasureWrapHeight(const Element& element, int viewport_width,
-                      int seed_cap) {
-  // +1: a screen filled exactly to the seed is indistinguishable from a
-  // truncated one, so an exact-fit seed always wasted one grow-and-re-render
-  // pass; the slack makes exact fits a single pass.
-  int cap = std::clamp(seed_cap + 1, 256, 65536);
-  for (;;) {
-    Screen screen = Screen::Create(Dimension::Fixed(viewport_width),
-                                   Dimension::Fixed(cap));
-    Render(screen, element);
-    int last = -1;
-    for (int row = 0; row < cap; ++row) {
-      for (int col = 0; col < viewport_width; ++col) {
-        const Cell& cell = screen.CellAt(col, row);
-        if ((cell.character != " " && cell.character != "") ||
-            cell.background_color != Color::Default) {
-          last = row;
-          break;
-        }
-      }
-    }
-    if (last < cap - 1 || cap >= 65536) {
-      return last + 1;
-    }
-    cap *= 4;
-  }
-}
-
 class ScrollerBase : public ComponentBase {
  public:
   ScrollerBase(Component child, Ref<int> selected, Ref<int> viewport_height,
                 std::function<void(int, int)> on_change, Ref<int> selected_x,
                 Ref<int> viewport_width, Ref<bool> horizontal_scroll,
-                int* content_height_out, Ref<int> wrap_hint_w,
-                Ref<int> wrap_hint_h, const markit::KeyBindings* keybindings)
+                int* content_height_out, Ref<int> wrap_height,
+                const markit::KeyBindings* keybindings)
       : selected_(std::move(selected)),
         viewport_height_(std::move(viewport_height)),
         on_change_(std::move(on_change)),
@@ -77,8 +42,7 @@ class ScrollerBase : public ComponentBase {
         viewport_width_(std::move(viewport_width)),
         horizontal_scroll_(std::move(horizontal_scroll)),
         content_height_out_(content_height_out),
-        wrap_hint_w_(std::move(wrap_hint_w)),
-        wrap_hint_h_(std::move(wrap_hint_h)),
+        wrap_height_(std::move(wrap_height)),
         keybindings_(keybindings) {
     Add(child);
   }
@@ -111,15 +75,12 @@ class ScrollerBase : public ComponentBase {
     // Mirror that here and add +0.5 so the truncation lands on the intended
     // row. (The old `- 1` assumed exclusive bounds: every position showed
     // one row too early and the last row stayed unreachable at End.) This is
-    // re-clamped in wrap mode after the wrapped height is measured.
+    // re-clamped after the content height is known.
     float y = static_cast<float>(*selected_) +
               static_cast<float>((viewport_height - 1) / 2) + 0.5f;
 
-    // Scroll mode: content keeps its natural (full) width so it can be
-    // panned. The wrap measurement below is mode-specific (the content tree
-    // differs per mode), so invalidate it when leaving wrap mode.
+    // Scroll mode: content keeps its natural (full) width so it can be panned.
     if (*horizontal_scroll_) {
-      wrap_measured_ = false;
       content_height_ = natural_height;
       content_width_ = natural_width;
       y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
@@ -137,35 +98,12 @@ class ScrollerBase : public ComponentBase {
 
     // Wrap mode. A frame (xframe) would lay the content out at its natural
     // width and then clip it, which defeats reflow; without it the content
-    // fills the viewport width and hflow wraps there. Measure the wrapped
-    // height once per viewport width for the vertical scroll math.
-    if (!wrap_measured_ || measured_wrap_width_ != viewport_width) {
-      if (*wrap_hint_w_ == viewport_width && *wrap_hint_h_ > 0) {
-        // The toggle path already rendered this tree at this width (the
-        // anchor's new-tree capture has identical row semantics): adopt the
-        // height instead of laying the document out again.
-        measured_wrap_width_ = viewport_width;
-        measured_wrap_height_ = std::max(1, *wrap_hint_h_);
-        wrap_measured_ = true;
-        *wrap_hint_w_ = -1;  // consume; a width mismatch below keeps a stale
-                             // hint for a later resize back (same tree).
-      } else {
-        measured_wrap_width_ = viewport_width;
-        wrap_measured_ = true;
-        // Wrapped rows >= unwrapped rows: scale the natural height by the
-        // reflow ratio so the measurement usually renders once; the growth
-        // loop inside stays as the backstop for heavier reflow.
-        const int reflow_ratio =
-            std::max(1, (natural_width + viewport_width - 1) / viewport_width);
-        measured_wrap_height_ = std::max(
-            1, MeasureWrapHeight(background, viewport_width,
-                                 natural_height * reflow_ratio));
-      }
-    }
-    // Every render passes through here (not only measuring ones): restore
-    // the cached height, otherwise the natural height assigned above would
-    // silently shrink the scroll range back to the unwrapped size.
-    content_height_ = measured_wrap_height_;
+    // fills the viewport width and hflow wraps there. The caller supplies the
+    // wrapped height from the document layout snapshot; when it is absent
+    // (content that does not reflow) the unwrapped requirement is used.
+    content_height_ = (*wrap_height_ >= 0)
+                          ? std::max(1, *wrap_height_)
+                          : natural_height;
     content_width_ = viewport_width;
     y = std::clamp(y / static_cast<float>(content_height_), 0.f, 1.f);
     PublishContentHeight();
@@ -252,14 +190,10 @@ class ScrollerBase : public ComponentBase {
   Ref<int> viewport_width_;
   Ref<bool> horizontal_scroll_;
   int* content_height_out_;
-  Ref<int> wrap_hint_w_;
-  Ref<int> wrap_hint_h_;
+  Ref<int> wrap_height_;
   const markit::KeyBindings* keybindings_;
    int content_height_ = -1;
    int content_width_ = -1;
-   int measured_wrap_width_ = -1;
-   int measured_wrap_height_ = 1;
-   bool wrap_measured_ = false;
    Element rendered_tree_;
    int natural_height_ = 1;
    int natural_width_ = 1;
@@ -271,14 +205,13 @@ Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
                     std::function<void(int before, int after)> on_change,
                     Ref<int> selected_x, Ref<int> viewport_width,
                     Ref<bool> horizontal_scroll, int* content_height_out,
-                    Ref<int> wrap_hint_w, Ref<int> wrap_hint_h,
+                    Ref<int> wrap_height,
                     const markit::KeyBindings* keybindings) {
   return Make<ScrollerBase>(std::move(child), std::move(selected),
                             std::move(viewport_height), std::move(on_change),
                             std::move(selected_x), std::move(viewport_width),
                             std::move(horizontal_scroll), content_height_out,
-                            std::move(wrap_hint_w), std::move(wrap_hint_h),
-                            keybindings);
+                            std::move(wrap_height), keybindings);
 }
 
 }  // namespace ftxui

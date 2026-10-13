@@ -32,13 +32,12 @@ namespace ftxui {
 /// @param content_height_out Optional out-param receiving the measured content
 ///        height (scroll or wrapped) on every render, for chrome such as a
 ///        status bar. Null when unneeded; -1 before the first render.
-/// @param wrap_hint_w Optional shared width of a pre-measured wrap height
-///        (see wrap_hint_h). When it equals the current viewport width on a
-///        wrap-mode render, the stored height is adopted instead of
-///        re-measuring; consumed (reset to -1) on adopt. -1 disables.
-/// @param wrap_hint_h Optional shared pre-measured wrap height, in rows
-///        through the last non-blank one (same semantics as the internal
-///        measurement), for the width in wrap_hint_w. -1 disables.
+/// @param wrap_height Optional shared wrapped content height for the current
+///        viewport width (rows through the last non-blank one), computed by the
+///        caller from the document layout snapshot. In wrap mode the scroller
+///        consumes it directly instead of measuring; -1 (default) falls back to
+///        the unwrapped requirement for content that does not reflow. Ignored
+///        in scroll mode.
 /// @param keybindings Key lists for the scroll/page/goto/pan actions (see
 ///        markit::KeyBindings). Null selects the compiled-in defaults.
 Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
@@ -47,8 +46,7 @@ Component Scroller(Component child, Ref<int> selected, Ref<int> viewport_height,
                     Ref<int> viewport_width = Ref<int>(1),
                     Ref<bool> horizontal_scroll = Ref<bool>(false),
                     int* content_height_out = nullptr,
-                    Ref<int> wrap_hint_w = Ref<int>(-1),
-                    Ref<int> wrap_hint_h = Ref<int>(-1),
+                    Ref<int> wrap_height = Ref<int>(-1),
                     const markit::KeyBindings* keybindings = nullptr);
 
 }  // namespace ftxui

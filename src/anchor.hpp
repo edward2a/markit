@@ -1,23 +1,27 @@
 // Section-scoped content anchor for the scroll/wrap mode toggle.
 //
-// When the user presses `w`, the content tree is rebuilt for the other mode
-// and row numbers change meaning (scroll counts unwrapped rows, wrap counts
-// reflowed visual rows), so the raw `selected` offset cannot be carried over.
-// Instead the top-of-view row is fingerprinted (first words of its normalized
-// text) inside its heading-delimited section, and the fingerprint is
-// re-located in the new layout's corresponding section.
+// The app drives heading navigation and the scroll/wrap toggle from immutable
+// LayoutSnapshot spans and rows (see the snapshot overloads below). The
+// element-based `LocateHeadingRows`, `MapTogglePosition` and `RenderTextRows`
+// below are the screen-rendering reference implementation, retained as a test
+// oracle that the snapshot paths are checked against; they are not on the
+// application path and carry the legacy 65,536-row cap.
 #ifndef MARKIT_ANCHOR_HPP
 #define MARKIT_ANCHOR_HPP
 
 #include <string>   // for string
+#include <functional>  // for function
+#include <mutex>    // for recursive_mutex
 #include <utility>  // for pair
-#include <vector>  // for vector
+#include <vector>   // for vector
 
 #include <ftxui/dom/elements.hpp>  // for Element
 
 #include "chrome.hpp"  // for Heading
 
 namespace markit {
+
+class LayoutSnapshot;
 
 // Normalized heading prefixes computed once for an immutable document
 // revision. Reuse this value across heading-map refreshes and mode toggles.
@@ -42,15 +46,31 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
     const ftxui::Element& tree, int width, int viewport_height, bool is_scroll,
     const HeadingFingerprints& fingerprints);
 
+// Snapshot overload: ordered (first-content-row, heading-index) pairs from the
+// spans captured at MD_BLOCK_H. Complete beyond the old 65,536-row render cap
+// and independent of text fingerprinting; empty headings still get a row.
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const LayoutSnapshot& snapshot);
+
 // Render `tree` offscreen at `width`, returning one plain-text row per
 // content row (raw cell text, rows through the last non-blank one; interior
 // blanks kept so indices align with scroll offsets). Extraction uses bounded
 // vertical windows, so `height_hint` is only a reserve hint for the returned
 // rows. Wrap trees render at the viewport width; scroll trees render wide (they
 // never split rows, so indices stay stable while clipped text becomes
-// searchable) — callers choose the width.
+// searchable) — callers choose the width. When `render_guard` is non-null it is
+// locked around each per-window FTXUI render (not the whole extraction) so a
+// background caller cannot monopolize the shared render guard. When `cancelled`
+// is set and returns true between windows the extraction stops early; callers
+// must treat an early stop as incomplete, not as a full row set. The optional
+// `chunk_cell_budget` bounds each screen tile's scratch cells (width x rows);
+// it affects only scratch allocation, never the extracted rows, so callers may
+// vary it (e.g. to exercise small and large tiles).
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
-                                        int height_hint);
+                                        int height_hint,
+                                        std::recursive_mutex* render_guard = nullptr,
+                                        const std::function<bool()>& cancelled = {},
+                                        int chunk_cell_budget = 1 << 20);
 
 // Extract width for search rows: the viewport width in wrap mode; in scroll
 // mode the tree's natural width, so clipped text is searchable while row
@@ -85,6 +105,15 @@ int MapTogglePosition(const ftxui::Element& old_tree,
                       int old_selected, int viewport_width, int viewport_height,
                       bool old_is_scroll,
                       const HeadingFingerprints& fingerprints,
+                      int* new_height_out = nullptr);
+
+// Snapshot overload: maps the offset between two display modes using the
+// complete row sets and structural heading spans held by the snapshots, with
+// no 65,536-row cap. Build a scroll snapshot at its natural width (full text)
+// and a wrap snapshot at the viewport width.
+int MapTogglePosition(const LayoutSnapshot& old_snapshot,
+                      const LayoutSnapshot& new_snapshot, int old_selected,
+                      int viewport_height, bool old_is_scroll,
                       int* new_height_out = nullptr);
 
 }  // namespace markit

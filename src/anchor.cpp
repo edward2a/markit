@@ -1,10 +1,13 @@
 // Implementation of the section-scoped content anchor. See anchor.hpp.
 #include "anchor.hpp"
 
+#include "layout_snapshot.hpp"
+
 #include <algorithm>  // for clamp, count_if, max
 #include <cmath>      // for llround
 #include <cstdlib>    // for abs
 #include <memory>     // for make_shared
+#include <mutex>      // for recursive_mutex
 #include <optional>  // for optional
 #include <string>     // for string, to_string
 #include <utility>    // for pair
@@ -24,7 +27,9 @@ namespace {
 // Words carried from the anchor row into the fingerprint.
 constexpr int kAnchorWords = 10;
 constexpr int kMaxRenderRows = 65536;
-constexpr int kRenderChunkCellBudget = 1 << 20;
+// Default screen-tile scratch budget for the oracle extraction path. Callers
+// (tests) may pass a smaller or larger budget; extraction is independent of it.
+constexpr int kDefaultRenderChunkCellBudget = 1 << 20;
 constexpr int kMinRenderChunkRows = 64;
 constexpr int kMaxRenderChunkRows = 512;
 
@@ -162,8 +167,8 @@ int SeedCap(int min_y, int viewport_height, int ratio) {
   return std::clamp<long long>(est, 256, 65536);
 }
 
-int RenderChunkRows(int width) {
-  const int by_budget = kRenderChunkCellBudget / std::max(1, width);
+int RenderChunkRows(int width, int cell_budget) {
+  const int by_budget = cell_budget / std::max(1, width);
   return std::clamp(by_budget, kMinRenderChunkRows, kMaxRenderChunkRows);
 }
 
@@ -199,16 +204,22 @@ class BoxCapture final : public ftxui::Node {
 // its last window; overlapping rows are skipped by the caller.
 template <typename Callback>
 void ForEachRenderChunk(const ftxui::Element& tree, int width,
-                        Callback&& callback) {
+                        Callback&& callback,
+                        std::recursive_mutex* render_guard = nullptr,
+                        const std::function<bool()>& cancelled = {},
+                        int chunk_cell_budget = kDefaultRenderChunkCellBudget) {
   if (!tree) {
     return;
   }
 
-  const int chunk_rows = RenderChunkRows(width);
+  const int chunk_rows = RenderChunkRows(width, chunk_cell_budget);
   ftxui::Screen screen =
       ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
                             ftxui::Dimension::Fixed(chunk_rows));
   for (int requested_start = 0;; requested_start += chunk_rows) {
+    if (cancelled && cancelled()) {
+      break;  // caller must treat the partial extraction as incomplete.
+    }
     ftxui::Box content_box;
     ftxui::Element captured =
         std::make_shared<BoxCapture>(tree, &content_box);
@@ -217,8 +228,17 @@ void ForEachRenderChunk(const ftxui::Element& tree, int width,
         ftxui::focusPosition(0, requested_start + (chunk_rows - 1) / 2) |
         ftxui::yframe;
 
-    screen.Clear();
-    ftxui::Render(screen, window);
+    // Lock the shared render guard around just this window's FTXUI render,
+    // never the whole extraction, so a background caller releases it between
+    // windows and the foreground can interleave input/draw work.
+    if (render_guard != nullptr) {
+      std::lock_guard<std::recursive_mutex> lock(*render_guard);
+      screen.Clear();
+      ftxui::Render(screen, window);
+    } else {
+      screen.Clear();
+      ftxui::Render(screen, window);
+    }
 
     const int actual_start = std::max(0, -content_box.y_min);
     const int first_row = std::max(requested_start, actual_start);
@@ -244,7 +264,10 @@ void ForEachRenderChunk(const ftxui::Element& tree, int width,
 // `may_reflow` selects the seed: wrap trees multiply rows at narrow widths
 // (scale by the reflow ratio), scroll trees never split rows (no scaling).
 std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
-                            int min_x, int viewport_height, bool may_reflow) {
+                            int min_x, int viewport_height, bool may_reflow,
+                            std::recursive_mutex* render_guard = nullptr,
+                            const std::function<bool()>& cancelled = {},
+                            int chunk_cell_budget = kDefaultRenderChunkCellBudget) {
   const int ratio = may_reflow ? std::max(1, (min_x + width - 1) / width) : 1;
   const int reserve_rows = SeedCap(min_y, viewport_height, ratio);
   std::vector<Row> rows;
@@ -288,7 +311,7 @@ std::vector<Row> RenderRows(ftxui::Element element, int width, int min_y,
         last = global_row;
       }
     }
-  });
+  }, render_guard, cancelled, chunk_cell_budget);
   if (last + 1 < static_cast<int>(rows.size())) {
     rows.resize(static_cast<size_t>(last + 1));
   }
@@ -355,6 +378,43 @@ int Proportional(int old_selected, int old_max, int new_max) {
   const double est =
       static_cast<double>(old_selected) / old_max * new_max;
   return std::clamp(static_cast<int>(std::llround(est)), 0, new_max);
+}
+
+// Row set from a snapshot for anchor/toggle matching: normalized row text
+// through the last non-space row. A snapshot built at a scroll tree's natural
+// width already holds full (unclipped) text; a wrap snapshot holds the wrapped
+// rows, so no separate widen pass is needed.
+std::vector<Row> SnapshotRows(const LayoutSnapshot& snapshot) {
+  std::vector<Row> rows;
+  rows.reserve(static_cast<size_t>(std::max(0, snapshot.height())));
+  int last = -1;
+  for (int r = 0; r < snapshot.height(); ++r) {
+    std::string text = Normalize(snapshot.RowText(r));
+    bool has_text = false;
+    for (char c : text) {
+      if (c != ' ') {
+        has_text = true;
+        break;
+      }
+    }
+    if (has_text) {
+      last = r;
+    }
+    rows.push_back(Row{std::move(text), false, false});
+  }
+  rows.resize(static_cast<size_t>(last + 1));
+  return rows;
+}
+
+// Heading boundary rows from structural spans, in document order.
+std::vector<int> BoundsFromSpans(const LayoutSnapshot& snapshot) {
+  std::vector<int> bounds;
+  for (const auto& [first, last] : snapshot.heading_spans()) {
+    if (first >= 0 && last >= first) {
+      bounds.push_back(first);
+    }
+  }
+  return bounds;
 }
 
 int ClampMax(const std::vector<Row>& rows, int viewport_height) {
@@ -438,7 +498,10 @@ HeadingFingerprints BuildHeadingFingerprints(
 // The height hint remains a reserve hint for the returned rows; bounded
 // windows remove the old full-height screen and no longer need a grow loop.
 std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
-                                         int height_hint) {
+                                        int height_hint,
+                                        std::recursive_mutex* render_guard,
+                                        const std::function<bool()>& cancelled,
+                                        int chunk_cell_budget) {
   width = std::clamp(width, 1, 8192);
   std::vector<std::string> rows;
   rows.reserve(static_cast<size_t>(std::clamp(height_hint, 1,
@@ -469,7 +532,7 @@ std::vector<std::string> RenderTextRows(const ftxui::Element& tree, int width,
         last = global_row;
       }
     }
-  });
+  }, render_guard, cancelled, chunk_cell_budget);
   if (last + 1 < static_cast<int>(rows.size())) {
     rows.resize(static_cast<size_t>(last + 1));
   }
@@ -611,6 +674,46 @@ int MapTogglePosition(const ftxui::Element& old_tree,
                            BuildHeadingFingerprints(headings), new_height_out);
 }
 
+int MapTogglePosition(const LayoutSnapshot& old_snapshot,
+                      const LayoutSnapshot& new_snapshot, int old_selected,
+                      int viewport_height, bool old_is_scroll,
+                      int* new_height_out) {
+  if (viewport_height < 1) {
+    return 0;
+  }
+  std::vector<Row> old_rows = SnapshotRows(old_snapshot);
+  std::vector<Row> new_rows = SnapshotRows(new_snapshot);
+  if (old_rows.empty() || new_rows.empty()) {
+    return 0;
+  }
+  if (new_height_out != nullptr) {
+    *new_height_out = static_cast<int>(new_rows.size());
+  }
+  const int new_max = ClampMax(new_rows, viewport_height);
+  const int old_max = ClampMax(old_rows, viewport_height);
+
+  int idx = std::clamp(old_selected, 0, static_cast<int>(old_rows.size()) - 1);
+  while (idx > 0 && old_rows[idx].text.empty()) {
+    --idx;
+  }
+  const int delta = old_selected - idx;
+  const std::string fp = Fingerprint(old_rows[idx].text);
+
+  const std::vector<int> old_bounds = BoundsFromSpans(old_snapshot);
+  const std::vector<int> new_bounds = BoundsFromSpans(new_snapshot);
+
+  if (auto hit = HeadingAnchor(old_bounds, new_bounds, idx, delta,
+                               old_selected, old_max, new_max)) {
+    return *hit;
+  }
+  const int est = Proportional(old_selected, old_max, new_max);
+  const int section = SectionId(old_bounds, idx);
+  const SectionMatch m =
+      MatchSection(new_rows, new_bounds, section, fp, est, old_is_scroll);
+  const int pos = (m.row >= 0) ? m.row : est;
+  return std::clamp(pos + delta, 0, new_max);
+}
+
 std::vector<std::pair<int, int>> LocateHeadingRows(
     const ftxui::Element& tree, const std::vector<Heading>& headings,
     int width, int viewport_height, bool is_scroll) {
@@ -639,6 +742,21 @@ std::vector<std::pair<int, int>> LocateHeadingRows(
       [&](std::size_t row, std::size_t heading) {
         located.emplace_back(static_cast<int>(row), static_cast<int>(heading));
       });
+  return located;
+}
+
+std::vector<std::pair<int, int>> LocateHeadingRows(
+    const LayoutSnapshot& snapshot) {
+  std::vector<std::pair<int, int>> located;
+  const std::vector<std::pair<int, int>>& spans = snapshot.heading_spans();
+  located.reserve(spans.size());
+  for (std::size_t ordinal = 0; ordinal < spans.size(); ++ordinal) {
+    const auto& [first, last] = spans[ordinal];
+    if (first < 0 || last < first) {
+      continue;  // heading did not lay out (e.g. no snapshot capture).
+    }
+    located.emplace_back(first, static_cast<int>(ordinal));
+  }
   return located;
 }
 
