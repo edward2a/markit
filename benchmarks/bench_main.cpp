@@ -17,6 +17,7 @@
 
 #include "anchor.hpp"
 #include "config.hpp"
+#include "layout_snapshot.hpp"
 #include "markdown.hpp"
 #include "search.hpp"
 
@@ -146,6 +147,41 @@ void PrintResult(const std::string& name, const Fixture& fixture,
 void BenchmarkFixture(const Fixture& fixture, const Options& options) {
   const markit::Config wrap = ConfigFor(markit::WrapMode::Wrap);
   const markit::Config scroll = ConfigFor(markit::WrapMode::Scroll);
+
+  // Production path: build the live tree + immutable snapshot in one pass
+  // (this is what the app prepares on the worker), then read its rows.
+  PrintResult(
+      "snapshot_build_wrap", fixture, options,
+      Measure(options, [&] {
+        markit::LayoutSnapshot snapshot;
+        markit::BuildMarkdownSnapshot(fixture.markdown, wrap.theme,
+                                      markit::WrapMode::Wrap,
+                                      fixture.viewport_width, snapshot);
+        return static_cast<std::size_t>(snapshot.height());
+      }));
+
+  const int scroll_natural_width = markit::SearchExtractWidth(
+      markit::RenderMarkdown(fixture.markdown, scroll),
+      fixture.viewport_width, /*is_scroll=*/true);
+  PrintResult(
+      "snapshot_build_scroll", fixture, options,
+      Measure(options, [&] {
+        markit::LayoutSnapshot snapshot;
+        markit::BuildMarkdownSnapshot(fixture.markdown, scroll.theme,
+                                      markit::WrapMode::Scroll,
+                                      scroll_natural_width, snapshot);
+        return static_cast<std::size_t>(snapshot.height());
+      }));
+
+  {
+    markit::LayoutSnapshot snapshot;
+    markit::BuildMarkdownSnapshot(fixture.markdown, wrap.theme,
+                                  markit::WrapMode::Wrap,
+                                  fixture.viewport_width, snapshot);
+    PrintResult(
+        "snapshot_text_rows", fixture, options,
+        Measure(options, [&] { return snapshot.TextRows().size(); }));
+  }
 
   PrintResult(
       "render_markdown", fixture, options,
