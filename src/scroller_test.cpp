@@ -137,7 +137,7 @@ TEST(Scroller, UpMovesOneAndClampsAtTop) {
   EXPECT_EQ(selected, 4);
 
   selected = 0;
-  ASSERT_FALSE(scroller->OnEvent(ftxui::Event::k));
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::k));  // consumed even at the top
   EXPECT_EQ(selected, 0);
 }
 
@@ -209,7 +209,7 @@ TEST(Scroller, HomeEnd) {
   EXPECT_EQ(selected, n - kHeight);  // max offset = content - viewport
 
   // No change at the bounds.
-  ASSERT_FALSE(scroller->OnEvent(ftxui::Event::End));
+  ASSERT_TRUE(scroller->OnEvent(ftxui::Event::End));  // consumed at the bound
   EXPECT_EQ(selected, n - kHeight);
 }
 
@@ -241,13 +241,14 @@ TEST(Scroller, NoScrollWhenContentFitsViewport) {
   auto scroller = WrapScroller(MakeLines(n), &selected, &viewport);
   Prime(scroller);
 
-  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::j));
-  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::k));
-  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::PageDown));
-  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::PageUp));
-  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::Character(' ')));
-  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::End));
-  EXPECT_FALSE(scroller->OnEvent(ftxui::Event::Home));
+  // Navigation keys are consumed even when they cannot move the view.
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::j));
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::k));
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::PageDown));
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::PageUp));
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::Character(' ')));
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::End));
+  EXPECT_TRUE(scroller->OnEvent(ftxui::Event::Home));
   EXPECT_EQ(selected, 0);
 }
 

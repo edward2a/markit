@@ -414,8 +414,12 @@ TEST(Config, KeyBindings_DefaultsMatchHistoricalMappings) {
   EXPECT_EQ(kb.page_down,
             (std::vector<ftxui::Event>{ftxui::Event::PageDown,
                                        ftxui::Event::Character(' ')}));
-  EXPECT_EQ(kb.goto_top, (std::vector<ftxui::Event>{ftxui::Event::Home}));
-  EXPECT_EQ(kb.goto_bottom, (std::vector<ftxui::Event>{ftxui::Event::End}));
+  EXPECT_EQ(kb.goto_top,
+            (std::vector<ftxui::Event>{ftxui::Event::Home,
+                                       ftxui::Event::Character('g')}));
+  EXPECT_EQ(kb.goto_bottom,
+            (std::vector<ftxui::Event>{ftxui::Event::End,
+                                       ftxui::Event::Character('G')}));
   EXPECT_EQ(kb.pan_left,
             (std::vector<ftxui::Event>{ftxui::Event::ArrowLeft,
                                        ftxui::Event::Character('h')}));

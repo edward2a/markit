@@ -161,7 +161,15 @@ class ScrollerBase : public ComponentBase {
 
     after = std::clamp(after, 0, max_offset);
     if (after == before) {
-      return false;
+      // Navigation keys stay consumed at a boundary. Returning false would let
+      // FTXUI's Vertical container move focus on j/k/arrows/Home/End/PageUp/
+      // PageDown to the hidden search input, which then swallows the keys.
+      return markit::MatchesKey(event, kb.scroll_up) ||
+             markit::MatchesKey(event, kb.scroll_down) ||
+             markit::MatchesKey(event, kb.page_up) ||
+             markit::MatchesKey(event, kb.page_down) ||
+             markit::MatchesKey(event, kb.goto_top) ||
+             markit::MatchesKey(event, kb.goto_bottom);
     }
     set_selected(after);
     return true;
