@@ -398,8 +398,8 @@ const KeyBindingActionDef kKeyBindingActions[] = {
     {"scroll_down", &KeyBindings::scroll_down, 0, {"down", "j"}},
     {"page_up", &KeyBindings::page_up, 0, {"pageup"}},
     {"page_down", &KeyBindings::page_down, 0, {"pagedown", "space"}},
-    {"goto_top", &KeyBindings::goto_top, 0, {"home"}},
-    {"goto_bottom", &KeyBindings::goto_bottom, 0, {"end"}},
+    {"goto_top", &KeyBindings::goto_top, 0, {"home", "g"}},
+    {"goto_bottom", &KeyBindings::goto_bottom, 0, {"end", "G"}},
     {"pan_left", &KeyBindings::pan_left, 0, {"left", "h"}},
     {"pan_right", &KeyBindings::pan_right, 0, {"right", "l"}},
     {"search_open", &KeyBindings::search_open, 0, {"slash"}},
@@ -415,8 +415,8 @@ const KeyBindingActionDef kKeyBindingActions[] = {
     {"nav_down", &KeyBindings::nav_down, 1, {"down", "j"}},
     {"nav_page_up", &KeyBindings::nav_page_up, 1, {"pageup"}},
     {"nav_page_down", &KeyBindings::nav_page_down, 1, {"pagedown", "space"}},
-    {"nav_top", &KeyBindings::nav_top, 1, {"home"}},
-    {"nav_bottom", &KeyBindings::nav_bottom, 1, {"end"}},
+    {"nav_top", &KeyBindings::nav_top, 1, {"home", "g"}},
+    {"nav_bottom", &KeyBindings::nav_bottom, 1, {"end", "G"}},
     {"nav_activate", &KeyBindings::nav_activate, 1, {"enter"}},
 };
 
@@ -748,8 +748,8 @@ void DumpDefaultConfig(std::ostream& out) {
        << "  scroll_down: [down, j]\n"
        << "  page_up: [pageup]\n"
        << "  page_down: [pagedown, space]\n"
-       << "  goto_top: [home]\n"
-       << "  goto_bottom: [end]\n"
+       << "  goto_top: [home, g]\n"
+       << "  goto_bottom: [end, G]\n"
        << "  pan_left: [left, h]       # scroll display mode only\n"
        << "  pan_right: [right, l]     # scroll display mode only\n"
        << "  # search and toggles\n"
@@ -767,8 +767,8 @@ void DumpDefaultConfig(std::ostream& out) {
        << "  nav_down: [down, j]\n"
        << "  nav_page_up: [pageup]\n"
        << "  nav_page_down: [pagedown, space]\n"
-       << "  nav_top: [home]\n"
-       << "  nav_bottom: [end]\n"
+       << "  nav_top: [home, g]\n"
+       << "  nav_bottom: [end, G]\n"
        << "  nav_activate: [enter]\n";
 }
 
